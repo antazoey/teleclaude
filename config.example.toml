@@ -1,0 +1,45 @@
+# teleclaude config. Copy to ~/.config/teleclaude/config.toml (or point TELECLAUDE_CONFIG at it)
+# and chmod 600, since it holds secrets. Environment variables override every setting shown.
+
+# Which registered channel to use. telegram is the only one so far.
+channel = "telegram"
+
+[telegram]
+# Daemon side: the bot token from @BotFather. Env: TELEGRAM_BOT_TOKEN or BOT_API_KEY.
+bot_token = "123456:ABC-your-token-here"
+# Daemon side: the one account the bot answers. Left unset, the first sender pairs and is
+# written to .env next to daemon.py. Env: TELEGRAM_USER_ID.
+# user_id = 123456789
+
+# Client side: the bot to talk to, and your app credentials from https://my.telegram.org/apps.
+# Env: TELEGRAM_BOT_USERNAME, TELEGRAM_API_ID, TELEGRAM_API_HASH (or TELEGRAM_API_KEY).
+bot_username = "your_teleclaude_bot"
+api_id = 12345678
+api_hash = "0123456789abcdef0123456789abcdef"
+# session = "~/.config/teleclaude/telegram"
+
+[daemon]
+# Where Claude turns start. Env: CLAUDE_WORKDIR.
+workdir = "~"
+# Env: CLAUDE_BIN, UV_BIN, CLAUDE_MODEL.
+claude_bin = "~/.local/bin/claude"
+# uv_bin = "~/.local/bin/uv"
+# model = "opus"
+# Runs Claude with --dangerously-skip-permissions, since nobody can answer a prompt remotely.
+# Env: SKIP_PERMISSIONS.
+skip_permissions = true
+# Raw tool input instead of plain descriptions. Env: TELECLAUDE_DEBUG.
+debug = false
+
+# Optional /diff: a web viewer that checks an HMAC-signed expiry.
+# Env: TELECLAUDE_DIFF_URL, TELECLAUDE_DIFF_AUTH_KEY.
+# diff_url = "https://diff.example.com"
+# diff_auth_key = "shared-secret"
+
+# Optional /clean: a script run with --force that writes a JSON status file.
+# clean_script = "~/bin/clean.sh"
+# clean_status = "~/bin/clean-status.json"
+
+[client]
+# SSH host running the daemon, for push-session.py. Env: TELECLAUDE_HOST.
+# ssh_host = "my-server"

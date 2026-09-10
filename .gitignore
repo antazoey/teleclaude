@@ -1,0 +1,10 @@
+.env
+config.toml
+actions.json
+*.session
+*.session-journal
+*.log
+*.bak*
+__pycache__/
+.pytest_cache/
+.ruff_cache/

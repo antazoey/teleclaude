@@ -1,0 +1,25 @@
+[Unit]
+Description=teleclaude daemon: drives Claude Code over a chat channel
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Replace YOUR_USER and the paths below with your own.
+User=YOUR_USER
+Group=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/teleclaude
+Environment=PATH=/home/YOUR_USER/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TELECLAUDE_CONFIG=/home/YOUR_USER/.config/teleclaude/config.toml
+ExecStart=/home/YOUR_USER/.local/bin/uv run /home/YOUR_USER/teleclaude/daemon.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=teleclaude
+
+[Install]
+WantedBy=multi-user.target
