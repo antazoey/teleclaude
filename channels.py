@@ -1,6 +1,7 @@
 """Channels carry teleclaude messages: a receiver on the daemon's side, a sender on the client's."""
 
 import asyncio
+import base64
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import NamedTuple
@@ -12,6 +13,7 @@ MAX_MESSAGE_CHARS = 3800
 RECEIVERS = {}
 SENDERS = {}
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
+TELEGRAM_FILE_API = "https://api.telegram.org/file/bot{token}/{path}"
 TELEGRAM_POLL_SECONDS = 50
 TELEGRAM_RETRY_SECONDS = 5
 TELEGRAM_SESSION_PATH = Path.home() / ".config/teleclaude/telegram"
@@ -52,6 +54,7 @@ class Inbound(NamedTuple):
     chat_id: int | str
     text: str
     message_id: int | str | None
+    images: tuple = ()
 
 
 class TeleclaudeChannelReceiver(ABC):
@@ -174,7 +177,11 @@ class TelegramChannelReceiver(TeleclaudeChannelReceiver):
 
     async def admit(self, message):
         """The message as an Inbound when its sender may prompt the daemon; the first sender pairs."""
-        if not message or not message.get("text"):
+        if not message:
+            return None
+
+        text = message.get("text") or message.get("caption") or ""
+        if not text and not self.image_file(message):
             return None
 
         chat_id = message["chat"]["id"]
@@ -190,7 +197,37 @@ class TelegramChannelReceiver(TeleclaudeChannelReceiver):
             print(f"ignored message from {message.get('from')}", flush=True)
             return None
 
-        return Inbound(chat_id, message["text"], message.get("message_id"))
+        return Inbound(chat_id, text, message.get("message_id"), await self.collect_images(message))
+
+    def image_file(self, message):
+        """The Telegram file id and media type of an attached image, or None."""
+        photos = message.get("photo")
+        if photos:
+            return photos[-1]["file_id"], "image/jpeg"
+
+        document = message.get("document") or {}
+        mime = document.get("mime_type", "")
+        if mime.startswith("image/"):
+            return document["file_id"], mime
+
+        return None
+
+    async def collect_images(self, message):
+        """Base64 image blocks for an attached image (largest rendition), empty when none."""
+        found = self.image_file(message)
+        if not found:
+            return ()
+
+        file_id, media_type = found
+        data = await self.download_file(file_id)
+        return ({"media_type": media_type, "data": base64.b64encode(data).decode()},)
+
+    async def download_file(self, file_id):
+        """The raw bytes of a Telegram file by id."""
+        info = await self.call("getFile", file_id=file_id)
+        response = await self.http.get(TELEGRAM_FILE_API.format(token=self.token, path=info["file_path"]))
+        response.raise_for_status()
+        return response.content
 
     async def send(self, chat_id, text, reply_to=None):
         reply = {"reply_parameters": {"message_id": reply_to, "allow_sending_without_reply": True}} if reply_to else {}

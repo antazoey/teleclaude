@@ -120,6 +120,36 @@ async def test_handle_turn_streams_every_prompt_into_one_process(mocker):
 
 
 @pytest.mark.asyncio
+async def test_handle_streams_an_image_as_content_blocks(mocker):
+    channel = mocker.AsyncMock()
+    service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
+    stream = FakeStream()
+
+    async def fake_exec(*args, **kwargs):
+        return stream
+
+    image = {"media_type": "image/jpeg", "data": "QUJD"}
+    with mock.patch.object(asyncio, "create_subprocess_exec", fake_exec):
+        await service.handle(Inbound(7, "look", 100, (image,)))
+        while service.session.pending:
+            await asyncio.sleep(0)
+
+    service.session.reader.cancel()
+    content = stream.prompts[0]
+    assert content[0] == {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "QUJD"}}
+    assert content[-1] == {"type": "text", "text": "The user sent an image.\n\nlook"}
+
+
+def test_user_message_flags_an_image_even_without_a_caption():
+    image = {"media_type": "image/png", "data": "QUJD"}
+    content = json.loads(daemon.user_message("", (image,)))["message"]["content"]
+    assert content == [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}},
+        {"type": "text", "text": "The user sent an image."},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_handle_answers_an_envelope_in_kind(mocker):
     channel = mocker.AsyncMock(max_message_chars=200)
     service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
@@ -175,6 +205,10 @@ async def test_upgrade_restarts_only_when_every_check_passes(mocker):
     await service.upgrade(PLAIN_REQUEST)
 
     restart.assert_called_once_with(7, "/envs/new/bin/python3")
+
+
+def test_boot_greeting_announces_the_running_version():
+    assert daemon.boot_greeting() == f"Hello! This is teleclaude v{daemon.VERSION}, up on the new code."
 
 
 def test_restart_environment_carries_the_conversation(mocker):

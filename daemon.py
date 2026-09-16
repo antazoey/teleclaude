@@ -26,6 +26,7 @@ import protocol
 from channels import RECEIVERS, find_channel
 from config import Config
 
+VERSION = "0.0.1"
 SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_DIR = SCRIPT_PATH.parent
 ENV_PATH = PROJECT_DIR / ".env"
@@ -437,8 +438,20 @@ def claude_command(session, claude_bin, skip_permissions):
     return command
 
 
-def user_message(prompt):
-    return json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n"
+def image_block(image):
+    return {"type": "image", "source": {"type": "base64", "media_type": image["media_type"], "data": image["data"]}}
+
+
+def user_message(prompt, images=()):
+    content = prompt
+    if images:
+        note = "The user sent an image." if len(images) == 1 else f"The user sent {len(images)} images."
+        if prompt:
+            note = f"{note}\n\n{prompt}"
+
+        content = [image_block(image) for image in images] + [{"type": "text", "text": note}]
+
+    return json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
 
 
 async def stream_json_lines(stream):
@@ -553,7 +566,7 @@ class Daemon:
             elif is_stop_request(text):
                 await self.reply(request, self.stop_everything())
             else:
-                await self.handle_turn(request, text)
+                await self.handle_turn(request, text, inbound.images)
         except Exception as error:
             await self.reply(request, f"daemon error: {error}")
 
@@ -825,14 +838,14 @@ class Daemon:
         self.session.session_id = None
         await self.reply(request, f"Now in {target} (fresh conversation)")
 
-    async def handle_turn(self, request, prompt):
+    async def handle_turn(self, request, prompt, images=()):
         """Hands the prompt to Claude straight away; it does its own scheduling."""
         # Messages arriving together are handled concurrently, so one writer at a time
         # keeps them to a single process and keeps the stdin lines whole.
         async with self.stream_lock:
             await self.ensure_stream()
             if self.session.pending:
-                await self.reply(request, f"> {summarize(prompt)}", final=False)
+                await self.reply(request, f"> {summarize(prompt) or '[image]'}", final=False)
 
             self.session.pending.append(request)
             self.session.patient = mentions_long_wait(prompt)
@@ -842,7 +855,7 @@ class Daemon:
             self.last_sent_at = self.turn_started_at
             self.last_progress_at = self.turn_started_at
             self.recent_progress.clear()
-            self.session.process.stdin.write(user_message(prompt).encode())
+            self.session.process.stdin.write(user_message(prompt, images).encode())
             await self.session.process.stdin.drain()
 
         await self.channel.send_typing(request.chat_id)
@@ -1029,6 +1042,10 @@ class Daemon:
         return dropped
 
 
+def boot_greeting():
+    return f"Hello! This is teleclaude v{VERSION}, up on the new code."
+
+
 def parse_chat_id(value):
     return int(value) if value.lstrip("-").isdigit() else value
 
@@ -1058,9 +1075,9 @@ async def main(preflight=False):
             print(f"{PREFLIGHT_PYTHON_PREFIX}{sys.executable}", flush=True)
             return
 
-        print(f"{identity} listening on {receiver_class.name}, cwd={workdir}, claude={claude_bin}", flush=True)
+        print(f"{identity} v{VERSION} listening on {receiver_class.name}, cwd={workdir}, claude={claude_bin}", flush=True)
         if restarted["chat"]:
-            await channel.send(parse_chat_id(restarted["chat"]), "Back up on the new code.")
+            await channel.send(parse_chat_id(restarted["chat"]), boot_greeting())
 
         await daemon.run()
 

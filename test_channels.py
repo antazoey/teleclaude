@@ -1,3 +1,5 @@
+import base64
+
 import pytest
 
 from channels import MAX_MESSAGE_CHARS, RECEIVERS, SENDERS, TelegramChannelReceiver, TelegramChannelSender, find_channel
@@ -16,6 +18,25 @@ async def test_send_threads_every_chunk_under_the_prompt(mocker):
     assert len(threaded) > 1
     assert all(chunk.kwargs["reply_parameters"]["message_id"] == 55 for chunk in threaded)
     assert "reply_parameters" not in plain.kwargs
+
+
+@pytest.mark.asyncio
+async def test_admit_downloads_the_largest_photo_as_an_image_prompt(mocker):
+    receiver = TelegramChannelReceiver("token", mocker.AsyncMock(), allowed_user_id=42)
+    mocker.patch.object(receiver, "call", return_value={"file_path": "photos/big.jpg"})
+    receiver.http.get.return_value = mocker.Mock(content=b"\xff\xd8\xff", raise_for_status=mocker.Mock())
+
+    inbound = await receiver.admit({
+        "chat": {"id": 7},
+        "from": {"id": 42},
+        "message_id": 9,
+        "caption": "what is this?",
+        "photo": [{"file_id": "small"}, {"file_id": "large"}],
+    })
+
+    receiver.call.assert_awaited_once_with("getFile", file_id="large")
+    assert inbound.text == "what is this?"
+    assert inbound.images == ({"media_type": "image/jpeg", "data": base64.b64encode(b"\xff\xd8\xff").decode()},)
 
 
 def test_find_channel_defaults_to_telegram_and_rejects_unknown_names():
