@@ -26,7 +26,8 @@ import protocol
 from channels import RECEIVERS, find_channel
 from config import Config
 
-VERSION = "0.0.1"
+VERSION = "0.0.2"
+WORKING_PREFIX = "⚙️ "
 SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_DIR = SCRIPT_PATH.parent
 ENV_PATH = PROJECT_DIR / ".env"
@@ -574,7 +575,7 @@ class Daemon:
         """Answers in the form the request came in: plain text, or protocol envelopes."""
         reply_to = request.message_id if final else None
         if request.protocol_id is None:
-            await self.channel.send(request.chat_id, text, reply_to=reply_to)
+            await self.channel.send(request.chat_id, text if final else f"{WORKING_PREFIX}{text}", reply_to=reply_to)
             return
 
         kind = protocol.FINAL if final else protocol.PROGRESS

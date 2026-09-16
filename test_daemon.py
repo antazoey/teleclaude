@@ -184,7 +184,7 @@ async def test_handle_turn_does_not_wait_for_the_running_prompt(mocker):
 
     # Both reached claude without the second waiting on the first's answer.
     assert stream.prompts == ["first", "second"]
-    assert "> second" in sent_texts(channel)
+    assert f"{daemon.WORKING_PREFIX}> second" in sent_texts(channel)
     service.session.reader.cancel()
 
 
@@ -209,6 +209,19 @@ async def test_upgrade_restarts_only_when_every_check_passes(mocker):
 
 def test_boot_greeting_announces_the_running_version():
     assert daemon.boot_greeting() == f"Hello! This is teleclaude v{daemon.VERSION}, up on the new code."
+
+
+@pytest.mark.asyncio
+async def test_reply_marks_working_lines_apart_from_the_answer(mocker):
+    channel = mocker.AsyncMock()
+    service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
+
+    await service.reply(PLAIN_REQUEST, "Reading foo.py…", final=False)
+    await service.reply(PLAIN_REQUEST, "here is the answer", final=True)
+
+    working, answer = channel.send.call_args_list
+    assert working.args[1] == f"{daemon.WORKING_PREFIX}Reading foo.py…"
+    assert answer.args[1] == "here is the answer"
 
 
 def test_restart_environment_carries_the_conversation(mocker):
