@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import re
 import shutil
 import sys
@@ -26,8 +27,17 @@ import protocol
 from channels import RECEIVERS, find_channel
 from config import Config
 
-VERSION = "0.0.2"
+VERSION = "0.0.3"
 WORKING_PREFIX = "⚙️ "
+INITIAL_RESPONSES = (
+    "ok! Let me get started…",
+    "thinking…",
+    "your request has been forwarded to my brain! Please standby.",
+    "ugh… i was sleeping! Just kidding, on it.. ",
+    "do it yourself! Ugh, fine…",
+    "i just LOVE when you tell me what to do",
+    "you're the captain, i will oblige…",
+)
 SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_DIR = SCRIPT_PATH.parent
 ENV_PATH = PROJECT_DIR / ".env"
@@ -845,6 +855,8 @@ class Daemon:
         # keeps them to a single process and keeps the stdin lines whole.
         async with self.stream_lock:
             await self.ensure_stream()
+            if request.protocol_id is None:
+                await self.channel.send(request.chat_id, random.choice(INITIAL_RESPONSES))
             if self.session.pending:
                 await self.reply(request, f"> {summarize(prompt) or '[image]'}", final=False)
 

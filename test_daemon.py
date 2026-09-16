@@ -212,6 +212,22 @@ def test_boot_greeting_announces_the_running_version():
 
 
 @pytest.mark.asyncio
+async def test_handle_turn_opens_with_a_random_initial_response(mocker):
+    channel = mocker.AsyncMock()
+    service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
+    stream = FakeStream()
+
+    async def fake_exec(*args, **kwargs):
+        return stream
+
+    with mock.patch.object(asyncio, "create_subprocess_exec", fake_exec):
+        await service.handle_turn(PLAIN_REQUEST, "hello")
+
+    service.session.reader.cancel()
+    assert any(call.args[1] in daemon.INITIAL_RESPONSES for call in channel.send.call_args_list)
+
+
+@pytest.mark.asyncio
 async def test_reply_marks_working_lines_apart_from_the_answer(mocker):
     channel = mocker.AsyncMock()
     service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
