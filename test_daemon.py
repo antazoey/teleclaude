@@ -211,8 +211,89 @@ def test_boot_greeting_announces_the_running_version():
     assert daemon.boot_greeting() == f"Hello! This is teleclaude v{daemon.VERSION}, up on the new code."
 
 
+def test_record_deploy_appends_a_line_per_boot(mocker, tmp_path):
+    log = tmp_path / "deploy.log"
+    mocker.patch.object(daemon, "DEPLOY_LOG", log)
+
+    daemon.record_deploy("0.0.6")
+    daemon.record_deploy("0.0.7")
+
+    lines = log.read_text().splitlines()
+    assert len(lines) == 2
+    assert lines[0].endswith(" v0.0.6") and lines[1].endswith(" v0.0.7")
+
+
+def test_bump_version_increments_the_patch(mocker, tmp_path):
+    fake = tmp_path / "daemon.py"
+    fake.write_text('VERSION = "0.0.3"\nWORKING_PREFIX = "x"\n')
+    mocker.patch.object(daemon, "SCRIPT_PATH", fake)
+
+    assert daemon.bump_version() == "0.0.4"
+    assert 'VERSION = "0.0.4"' in fake.read_text()
+
+
 @pytest.mark.asyncio
-async def test_handle_turn_opens_with_a_random_initial_response(mocker):
+async def test_publish_upgrade_bumps_version_then_commits_and_pushes(mocker):
+    service = daemon.Daemon(mocker.AsyncMock(), daemon.Session("/tmp"), "claude", True)
+    mocker.patch.object(daemon, "bump_version", return_value="9.9.9")
+    calls = []
+
+    async def fake_run_check(command):
+        calls.append(command)
+        return (command[:3] != ["git", "diff", "--cached"]), ""
+
+    mocker.patch.object(daemon, "run_check", fake_run_check)
+    status = await service.publish_upgrade()
+
+    assert ["git", "add", "-A"] in calls
+    assert ["git", "commit", "-m", "teleclaude v9.9.9"] in calls
+    assert ["git", "push"] in calls
+    assert "9.9.9" in status
+
+
+@pytest.mark.asyncio
+async def test_publish_upgrade_skips_when_nothing_changed(mocker):
+    service = daemon.Daemon(mocker.AsyncMock(), daemon.Session("/tmp"), "claude", True)
+
+    async def fake_run_check(command):
+        return True, ""
+
+    mocker.patch.object(daemon, "run_check", fake_run_check)
+    assert "No code changes" in await service.publish_upgrade()
+
+
+def test_pick_initial_response_routes_by_topic():
+    assert daemon.pick_initial_response("can you do a PR review on tplus-core") in daemon.SASSY_RESPONSES
+    assert daemon.pick_initial_response("update the Soulaire evidence for spywear") in daemon.GENTLE_RESPONSES
+    # The investigation wins when a prompt trips both sets, so it never gets a sassy opener.
+    assert daemon.pick_initial_response("review the spywear transcript") in daemon.GENTLE_RESPONSES
+    assert daemon.pick_initial_response("what time is it") in daemon.NEUTRAL_RESPONSES
+
+
+def test_ordinal_handles_ones_and_teens():
+    assert [daemon.ordinal(n) for n in (1, 2, 3, 4, 11, 13, 22, 23)] == \
+        ["1st", "2nd", "3rd", "4th", "11th", "13th", "22nd", "23rd"]
+
+
+@pytest.mark.asyncio
+async def test_handle_turn_queues_a_request_behind_a_running_one(mocker):
+    channel = mocker.AsyncMock()
+    service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
+    stream = FakeStream()
+
+    async def fake_exec(*args, **kwargs):
+        return stream
+
+    with mock.patch.object(asyncio, "create_subprocess_exec", fake_exec):
+        service.session.pending.append(daemon.Request(7, 1))
+        await service.handle_turn(daemon.Request(7, 2), "second")
+
+    service.session.reader.cancel()
+    assert any("2nd in line" in call.args[1] for call in channel.send.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_handle_turn_opens_with_an_initial_response(mocker):
     channel = mocker.AsyncMock()
     service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
     stream = FakeStream()
@@ -224,7 +305,8 @@ async def test_handle_turn_opens_with_a_random_initial_response(mocker):
         await service.handle_turn(PLAIN_REQUEST, "hello")
 
     service.session.reader.cancel()
-    assert any(call.args[1] in daemon.INITIAL_RESPONSES for call in channel.send.call_args_list)
+    openers = daemon.SASSY_RESPONSES + daemon.GENTLE_RESPONSES + daemon.NEUTRAL_RESPONSES
+    assert any(call.args[1] in openers for call in channel.send.call_args_list)
 
 
 @pytest.mark.asyncio
@@ -441,7 +523,7 @@ async def test_stream_json_lines_reads_an_event_larger_than_the_stream_limit():
 
 @pytest.mark.asyncio
 async def test_heartbeat_forever_pings_only_once_the_chat_has_gone_quiet(mocker):
-    """The 30s invariant: a waiting chat hears something even when claude emits nothing."""
+    """The heartbeat invariant: a waiting chat hears something even when claude emits nothing."""
     mocker.patch.object(daemon, "HEARTBEAT_TICK_SECONDS", 0.01)
     channel = mocker.AsyncMock()
     service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)

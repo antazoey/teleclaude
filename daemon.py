@@ -17,6 +17,7 @@ import sys
 import time
 import urllib.parse
 from collections import deque
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import NamedTuple
@@ -27,9 +28,10 @@ import protocol
 from channels import RECEIVERS, find_channel
 from config import Config
 
-VERSION = "0.0.3"
+VERSION = "0.0.6"
 WORKING_PREFIX = "⚙️ "
-INITIAL_RESPONSES = (
+DEPLOY_LOG = Path.home() / ".config/teleclaude/deploy.log"
+SASSY_RESPONSES = (
     "ok! Let me get started…",
     "thinking…",
     "your request has been forwarded to my brain! Please standby.",
@@ -37,6 +39,35 @@ INITIAL_RESPONSES = (
     "do it yourself! Ugh, fine…",
     "i just LOVE when you tell me what to do",
     "you're the captain, i will oblige…",
+)
+GENTLE_RESPONSES = (
+    "on it, love. hang tight.",
+    "okay, i've got you. let me look.",
+    "of course. give me a sec with this one.",
+    "yeah, let me dig into this carefully.",
+    "i'm on it, take a breath.",
+)
+NEUTRAL_RESPONSES = (
+    "ok, on it.",
+    "let me take a look.",
+    "one sec.",
+)
+QUEUED_RESPONSES = (
+    "I put your request in the queue! It's {pos} in line to my brain.",
+    "added to the queue — you're {pos} in line.",
+    "still on the last one; this makes you {pos} in line.",
+    "queued! {pos} in line to my brain, hang tight.",
+)
+TPLUS_MARKERS = re.compile(
+    r"\b(tplus|pull request|pr review|code review|reviews?|gh-dash|serge|rebase|clippy|utoipa|orderbook|cargo)\b"
+    r"|\bpr\b|merge main|catch up with main|github\.com/\S*tplus",
+    re.I,
+)
+SPYWEAR_MARKERS = re.compile(
+    r"\b(soulaire|soulbrai|brai|spywear|spies|soulful|cult|police|authorit\w*|casia|cece|fai|gemma"
+    r"|lorawai|bigfoot|katie|keonna|amber|larai|laira|hiavus|june|mission|glasses|edpa|nutraceutical"
+    r"|clinic|survivors?|evidence|transcript|documentary|alexia)\b",
+    re.I,
 )
 SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_DIR = SCRIPT_PATH.parent
@@ -46,7 +77,7 @@ HTTP_TIMEOUT_SECONDS = 65
 STREAM_LINE_LIMIT = 64 * 1024 * 1024
 STREAM_CHUNK_BYTES = 1024 * 1024
 DIFF_LINK_TTL_SECONDS = 12 * 3600
-HEARTBEAT_SECONDS = 30
+HEARTBEAT_SECONDS = 60
 HEARTBEAT_TICK_SECONDS = 1
 # A folded turn answers several prompts with one result, orphaning the rest of the queue.
 IDLE_DRAIN_SECONDS = 15
@@ -800,8 +831,28 @@ class Daemon:
 
             python = find_preflight_python(output) or python
 
-        await self.reply(request, "Checks passed, restarting.")
+        published = await self.publish_upgrade()
+        await self.reply(request, f"Checks passed, restarting.\n{published}")
         self.restart(request.chat_id, python)
+
+    async def publish_upgrade(self):
+        """Bump the patch version, then commit and push the deployed tree; best-effort."""
+        await run_check(["git", "add", "-A"])
+        clean, _ = await run_check(["git", "diff", "--cached", "--quiet"])
+        if clean:
+            return "No code changes to publish."
+
+        version = bump_version()
+        await run_check(["git", "add", "-A"])
+        committed, output = await run_check(["git", "commit", "-m", f"teleclaude v{version}"])
+        if not committed:
+            return f"Commit failed, deploying anyway.\n{output.strip()[-CHECK_OUTPUT_CHARS:]}"
+
+        pushed, output = await run_check(["git", "push"])
+        if not pushed:
+            return f"Committed v{version}; push failed (retries next upgrade).\n{output.strip()[-CHECK_OUTPUT_CHARS:]}"
+
+        return f"Published v{version} to origin."
 
     def restart(self, chat_id, python):
         os.execve(python, [python, str(SCRIPT_PATH)], self.restart_environment(chat_id))
@@ -856,7 +907,10 @@ class Daemon:
         async with self.stream_lock:
             await self.ensure_stream()
             if request.protocol_id is None:
-                await self.channel.send(request.chat_id, random.choice(INITIAL_RESPONSES))
+                if self.session.pending:
+                    await self.channel.send(request.chat_id, queued_response(len(self.session.pending) + 1))
+                else:
+                    await self.channel.send(request.chat_id, pick_initial_response(prompt))
             if self.session.pending:
                 await self.reply(request, f"> {summarize(prompt) or '[image]'}", final=False)
 
@@ -923,9 +977,6 @@ class Daemon:
         self.session.stop()
         self.drain()
         note = f"Gave up after {format_duration(stalled_for)} without progress."
-        if self.session.last_activity:
-            note += f"\nlast: {self.session.last_activity}"
-
         note += "\nSend /timeout off first if it genuinely needs longer."
         for request in requests:
             await self.notify(request, note)
@@ -950,8 +1001,6 @@ class Daemon:
         """What can be said about a quiet turn from this side of the pipe alone."""
         elapsed = format_duration(time.monotonic() - (self.turn_started_at or time.monotonic()))
         parts = [f"Teleclaude still thinking… ({elapsed})"]
-        if self.session.last_activity:
-            parts.append(f"last: {self.session.last_activity}")
         if not self.session.running:
             parts.append("the claude process is gone; /new to start over")
 
@@ -1059,6 +1108,45 @@ def boot_greeting():
     return f"Hello! This is teleclaude v{VERSION}, up on the new code."
 
 
+def record_deploy(version, when=None):
+    """Append this boot to the deploy log so what is live, and since when, is always auditable."""
+    stamp = (when or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    DEPLOY_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(DEPLOY_LOG, "a") as handle:
+        handle.write(f"{stamp} v{version}\n")
+
+
+def bump_version():
+    """Increment the patch version in this file on disk (a deploy-time step); returns the new version."""
+    source = SCRIPT_PATH.read_text()
+    current = re.search(r'^VERSION = "(\d+)\.(\d+)\.(\d+)"', source, re.M)
+    major, minor, patch = (int(part) for part in current.groups())
+    new_version = f"{major}.{minor}.{patch + 1}"
+    SCRIPT_PATH.write_text(source.replace(current.group(0), f'VERSION = "{new_version}"', 1))
+    return new_version
+
+
+def pick_initial_response(prompt):
+    """Fast keyword routing: sassy for tplus work, gentle for the investigation, plain otherwise."""
+    text = prompt or ""
+    if SPYWEAR_MARKERS.search(text):
+        return random.choice(GENTLE_RESPONSES)
+    if TPLUS_MARKERS.search(text):
+        return random.choice(SASSY_RESPONSES)
+
+    return random.choice(NEUTRAL_RESPONSES)
+
+
+def ordinal(number):
+    suffix = "th" if 10 <= number % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
+def queued_response(position):
+    """The opener for a request that lands while an earlier one is still running."""
+    return random.choice(QUEUED_RESPONSES).format(pos=ordinal(position))
+
+
 def parse_chat_id(value):
     return int(value) if value.lstrip("-").isdigit() else value
 
@@ -1088,6 +1176,7 @@ async def main(preflight=False):
             print(f"{PREFLIGHT_PYTHON_PREFIX}{sys.executable}", flush=True)
             return
 
+        record_deploy(VERSION)
         print(f"{identity} v{VERSION} listening on {receiver_class.name}, cwd={workdir}, claude={claude_bin}", flush=True)
         if restarted["chat"]:
             await channel.send(parse_chat_id(restarted["chat"]), boot_greeting())
