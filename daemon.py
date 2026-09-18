@@ -28,7 +28,7 @@ import protocol
 from channels import RECEIVERS, find_channel
 from config import Config
 
-VERSION = "0.0.6"
+VERSION = "0.0.7"
 WORKING_PREFIX = "⚙️ "
 DEPLOY_LOG = Path.home() / ".config/teleclaude/deploy.log"
 SASSY_RESPONSES = (
@@ -480,6 +480,14 @@ def claude_command(session, claude_bin, skip_permissions):
     return command
 
 
+def compose_prompt(prompt, reply_quote):
+    """Prefix the quoted message when the user used Telegram's reply, so Claude sees what they answered."""
+    if not reply_quote:
+        return prompt
+
+    return f"[The user is replying to this earlier message:]\n> {reply_quote}\n\n{prompt}"
+
+
 def image_block(image):
     return {"type": "image", "source": {"type": "base64", "media_type": image["media_type"], "data": image["data"]}}
 
@@ -608,7 +616,7 @@ class Daemon:
             elif is_stop_request(text):
                 await self.reply(request, self.stop_everything())
             else:
-                await self.handle_turn(request, text, inbound.images)
+                await self.handle_turn(request, text, inbound.images, inbound.reply_quote)
         except Exception as error:
             await self.reply(request, f"daemon error: {error}")
 
@@ -900,7 +908,7 @@ class Daemon:
         self.session.session_id = None
         await self.reply(request, f"Now in {target} (fresh conversation)")
 
-    async def handle_turn(self, request, prompt, images=()):
+    async def handle_turn(self, request, prompt, images=(), reply_quote=None):
         """Hands the prompt to Claude straight away; it does its own scheduling."""
         # Messages arriving together are handled concurrently, so one writer at a time
         # keeps them to a single process and keeps the stdin lines whole.
@@ -922,7 +930,7 @@ class Daemon:
             self.last_sent_at = self.turn_started_at
             self.last_progress_at = self.turn_started_at
             self.recent_progress.clear()
-            self.session.process.stdin.write(user_message(prompt, images).encode())
+            self.session.process.stdin.write(user_message(compose_prompt(prompt, reply_quote), images).encode())
             await self.session.process.stdin.drain()
 
         await self.channel.send_typing(request.chat_id)

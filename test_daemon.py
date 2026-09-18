@@ -140,6 +140,31 @@ async def test_handle_streams_an_image_as_content_blocks(mocker):
     assert content[-1] == {"type": "text", "text": "The user sent an image.\n\nlook"}
 
 
+def test_compose_prompt_prefixes_a_reply_quote():
+    composed = daemon.compose_prompt("yes, that one", "Which mission should I enrich, 60 or 61?")
+    assert "Which mission should I enrich, 60 or 61?" in composed
+    assert composed.endswith("yes, that one")
+    assert daemon.compose_prompt("hello", None) == "hello"
+
+
+@pytest.mark.asyncio
+async def test_handle_sends_a_reply_quote_into_the_prompt(mocker):
+    channel = mocker.AsyncMock()
+    service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
+    stream = FakeStream()
+
+    async def fake_exec(*args, **kwargs):
+        return stream
+
+    with mock.patch.object(asyncio, "create_subprocess_exec", fake_exec):
+        await service.handle(Inbound(7, "yes", 100, (), "Which mission should I enrich?"))
+        while service.session.pending:
+            await asyncio.sleep(0)
+
+    service.session.reader.cancel()
+    assert any("Which mission should I enrich?" in str(prompt) for prompt in stream.prompts)
+
+
 def test_user_message_flags_an_image_even_without_a_caption():
     image = {"media_type": "image/png", "data": "QUJD"}
     content = json.loads(daemon.user_message("", (image,)))["message"]["content"]

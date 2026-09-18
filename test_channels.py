@@ -39,6 +39,22 @@ async def test_admit_downloads_the_largest_photo_as_an_image_prompt(mocker):
     assert inbound.images == ({"media_type": "image/jpeg", "data": base64.b64encode(b"\xff\xd8\xff").decode()},)
 
 
+@pytest.mark.asyncio
+async def test_admit_carries_a_telegram_reply_quote(mocker):
+    receiver = TelegramChannelReceiver("token", mocker.AsyncMock(), allowed_user_id=42)
+
+    inbound = await receiver.admit({
+        "chat": {"id": 7},
+        "from": {"id": 42},
+        "message_id": 9,
+        "text": "yes, that one",
+        "reply_to_message": {"text": "Which mission should I enrich, 60 or 61?"},
+    })
+
+    assert inbound.text == "yes, that one"
+    assert inbound.reply_quote == "Which mission should I enrich, 60 or 61?"
+
+
 def test_find_channel_defaults_to_telegram_and_rejects_unknown_names():
     assert find_channel(RECEIVERS, Config()) is TelegramChannelReceiver
     assert find_channel(SENDERS, Config()) is TelegramChannelSender

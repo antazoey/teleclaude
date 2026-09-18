@@ -55,6 +55,7 @@ class Inbound(NamedTuple):
     text: str
     message_id: int | str | None
     images: tuple = ()
+    reply_quote: str | None = None
 
 
 class TeleclaudeChannelReceiver(ABC):
@@ -197,7 +198,9 @@ class TelegramChannelReceiver(TeleclaudeChannelReceiver):
             print(f"ignored message from {message.get('from')}", flush=True)
             return None
 
-        return Inbound(chat_id, text, message.get("message_id"), await self.collect_images(message))
+        replied = message.get("reply_to_message") or {}
+        reply_quote = replied.get("text") or replied.get("caption")
+        return Inbound(chat_id, text, message.get("message_id"), await self.collect_images(message), reply_quote)
 
     def image_file(self, message):
         """The Telegram file id and media type of an attached image, or None."""
