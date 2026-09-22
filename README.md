@@ -21,6 +21,7 @@ flowchart LR
 | `daemon.py` | server | The daemon. One long-lived Claude Code process per conversation. |
 | `teleclaude.py` | laptop | CLI client: sends a prompt or `/command`, prints the answer. |
 | `channels.py` | both | `TeleclaudeChannelReceiver` and `TeleclaudeChannelSender`, plus the Telegram implementations. |
+| `codebox.py` | server | Turns markdown replies into Telegram messages, drawing fenced code as editor boxes. |
 | `protocol.py` | both | The wire format. |
 | `config.py` | both | TOML config with environment overrides. |
 | `tui.py` | anywhere | Terminal UI over local Claude sessions. |
@@ -109,6 +110,7 @@ short narrated lines, then the answer arrives as a reply to your message.
 - `/debug [on|off]` raw tool input instead of narration
 - `/patient [on|off|auto]` force the long-wait pace, or detect it
 - `/timeout [on|off]` turn the no-progress timeout off, or back on
+- `/show <path>[:start[-end]]` a file or line range as highlighted code, no Claude turn
 - `/diff [path]`, `/clean [--only-show]` optional, see the config
 - `/upgrade` run the tests, preflight the edited daemon, restart onto it
 - `/help`
@@ -123,6 +125,19 @@ the recent ones, so a loop re-running the same commands counts as stuck while re
   build, a watch or sleep loop.
 - Never, after `/timeout off`, until `/timeout on`.
 
+## Code in replies
+
+Telegram cannot highlight code, so the Telegram channel draws every fenced block as an editor box:
+line numbers, indent guides, and Unicode bold and italic letters for keywords, functions, strings
+and comments. Claude is told to tag fences with the language, path and first line
+(`` ```rust src/book.rs:120 ``) and to show changes as `` ```diff ``, which becomes one box per
+file numbered by the new file.
+
+A box too long for one message splits where a reader loses the least: between definitions, with
+doc comments and attributes kept on their item, never inside a multi-line string, and inside a
+function body only when that function alone is too long. `**bold**`, `` `inline code` `` and
+headings become Telegram formatting. Envelopes are always sent verbatim.
+
 ## Updating the daemon from a chat
 
 Ask Claude for the change in a normal message, then send `/upgrade`. It runs the test suite and
@@ -132,8 +147,8 @@ conversation, directory, model and debug flag.
 
 ## Tests
 
-    uv run --with brotli --with httpx --with telethon --with textual \
-      --with pytest --with pytest-asyncio --with pytest-mock pytest -q
+    uv run --with brotli --with httpx --with pygments --with telethon --with text-unicoder \
+      --with textual --with pytest --with pytest-asyncio --with pytest-mock pytest -q
 
 ## Security
 

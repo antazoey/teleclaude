@@ -17,6 +17,11 @@ TELEGRAM_FILE_API = "https://api.telegram.org/file/bot{token}/{path}"
 TELEGRAM_POLL_SECONDS = 50
 TELEGRAM_RETRY_SECONDS = 5
 TELEGRAM_SESSION_PATH = Path.home() / ".config/teleclaude/telegram"
+TELEGRAM_REPLY_PROMPT = """Your replies are read in Telegram. Fenced code renders as a syntax-highlighted editor box with line numbers, and long boxes split across messages between functions.
+- Put code in a fence whose info string is the language and path, plus the first line number when the excerpt does not start at line 1: ```rust src/book.rs:120
+- Show changes as a ```diff fence holding unified diff output such as git diff; each file becomes its own box, numbered by the new file.
+- When reviewing, quote the exact lines you discuss with their real line numbers, and put each comment right after its fence.
+- **bold**, `inline code` and # headings render. Tables and [text](url) links do not, so use plain lists and bare URLs."""
 
 
 def register(registry):
@@ -65,6 +70,8 @@ class TeleclaudeChannelReceiver(ABC):
     max_message_chars = MAX_MESSAGE_CHARS
     # Where receiving resumes after a restart.
     cursor = None
+    # Appended to Claude's system prompt so replies suit how this channel renders them.
+    reply_prompt = None
 
     @classmethod
     @abstractmethod
@@ -80,8 +87,8 @@ class TeleclaudeChannelReceiver(ABC):
         """Yields an Inbound for every message from an allowed sender, forever."""
 
     @abstractmethod
-    async def send(self, chat_id, text, reply_to=None):
-        pass
+    async def send(self, chat_id, text, reply_to=None, verbatim=False):
+        """Sends markdown for a person to read, or `verbatim` text exactly as given."""
 
     async def send_typing(self, chat_id):
         pass
@@ -126,6 +133,7 @@ class TelegramChannelReceiver(TeleclaudeChannelReceiver):
     """A Telegram bot, polled over the Bot API, that answers only the account it is paired with."""
 
     name = "telegram"
+    reply_prompt = TELEGRAM_REPLY_PROMPT
 
     def __init__(self, token, http, allowed_user_id=None, remember_user=None, cursor=None):
         self.token = token
@@ -232,10 +240,19 @@ class TelegramChannelReceiver(TeleclaudeChannelReceiver):
         response.raise_for_status()
         return response.content
 
-    async def send(self, chat_id, text, reply_to=None):
+    async def send(self, chat_id, text, reply_to=None, verbatim=False):
         reply = {"reply_parameters": {"message_id": reply_to, "allow_sending_without_reply": True}} if reply_to else {}
-        for chunk in split_message(text, self.max_message_chars):
-            await self.call("sendMessage", chat_id=chat_id, text=chunk, disable_web_page_preview=True, **reply)
+        if verbatim:
+            messages = [(chunk, []) for chunk in split_message(text, self.max_message_chars)]
+        else:
+            # Pygments is a daemon-only dependency.
+            from codebox import build_messages
+
+            messages = build_messages(text, self.max_message_chars)
+
+        for chunk, entities in messages:
+            formatting = {"entities": entities} if entities else {}
+            await self.call("sendMessage", chat_id=chat_id, text=chunk, disable_web_page_preview=True, **reply, **formatting)
 
     async def send_typing(self, chat_id):
         await self.call("sendChatAction", chat_id=chat_id, action="typing")

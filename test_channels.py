@@ -55,6 +55,21 @@ async def test_admit_carries_a_telegram_reply_quote(mocker):
     assert inbound.reply_quote == "Which mission should I enrich, 60 or 61?"
 
 
+@pytest.mark.asyncio
+async def test_send_renders_markdown_unless_verbatim(mocker):
+    receiver = TelegramChannelReceiver("token", mocker.AsyncMock())
+    call = mocker.patch.object(receiver, "call")
+
+    await receiver.send(7, "Use `depth`:\n```rust src/book.rs:12\nfn depth() {}\n```")
+    await receiver.send(7, "tc1:`a`**b**", verbatim=True)
+
+    rendered, envelope = call.call_args_list
+    assert [entity["type"] for entity in rendered.kwargs["entities"]] == ["code", "pre"]
+    assert rendered.kwargs["text"].startswith("Use depth:\n╭─")
+    assert envelope.kwargs["text"] == "tc1:`a`**b**"
+    assert "entities" not in envelope.kwargs
+
+
 def test_find_channel_defaults_to_telegram_and_rejects_unknown_names():
     assert find_channel(RECEIVERS, Config()) is TelegramChannelReceiver
     assert find_channel(SENDERS, Config()) is TelegramChannelSender

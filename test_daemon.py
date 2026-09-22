@@ -191,6 +191,7 @@ async def test_handle_answers_an_envelope_in_kind(mocker):
     assert (final.request_id, final.kind) == ("abc", protocol.FINAL)
     assert f"> {model}" in final.text
     assert service.session.model == model
+    assert all(call.kwargs["verbatim"] for call in channel.send.call_args_list)
 
 
 @pytest.mark.asyncio
@@ -501,13 +502,28 @@ def test_render_models_shows_an_unlisted_model_as_passed_through():
     assert "passed straight to the CLI" in listing
 
 
-def test_claude_command_names_the_model_only_when_one_is_chosen():
+def test_claude_command_adds_model_and_reply_prompt_only_when_set():
     session = daemon.Session("/tmp")
-    assert "--model" not in daemon.claude_command(session, "claude", False)
+    bare = daemon.claude_command(session, "claude", False)
+    assert "--model" not in bare
+    assert "--append-system-prompt" not in bare
 
     session.model = "opus"
-    command = daemon.claude_command(session, "claude", False)
+    command = daemon.claude_command(session, "claude", False, "render fences")
     assert command[command.index("--model") + 1] == "opus"
+    assert command[command.index("--append-system-prompt") + 1] == "render fences"
+
+
+@pytest.mark.asyncio
+async def test_handle_command_show_fences_a_line_range(mocker, tmp_path):
+    (tmp_path / "notes.md").write_text("# notes\n```sh\nls\n```\nend\n")
+    channel = mocker.AsyncMock()
+    service = daemon.Daemon(channel, daemon.Session(tmp_path), "claude", True)
+
+    await service.handle_command(PLAIN_REQUEST, "/show notes.md:2-4")
+    await service.handle_command(PLAIN_REQUEST, "/show notes.md:9")
+
+    assert sent_texts(channel) == ["```` notes.md:2\n```sh\nls\n```\n````", "notes.md has 5 lines."]
 
 
 @pytest.mark.asyncio

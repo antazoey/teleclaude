@@ -19,6 +19,17 @@ in the user's chat with the daemon.
 - Anything that might run longer than a few minutes: run it with `run_in_background: true`,
   since a foreground Bash call dies at 10 minutes. You are notified when it exits.
 
+## A pasted prompt may arrive split
+
+Telegram caps a message at 4096 characters. Historically the daemon treated each piece of a
+split paste as its own task: the first chunk ran, the tail queued behind it ("this makes you
+2nd in line"), and the tail then ran on its own, out of context. The daemon is being fixed to
+coalesce consecutive messages into one prompt.
+
+If the user reports a queued or out-of-context tail, that is this bug, not `/stop` failing.
+`/stop` then `/new` clears it. Only fall back to splitting the work into a shorter prompt while
+the daemon still lacks coalescing; once it buffers, send the whole thing.
+
 ## Writing the prompt
 
 The daemon sees none of this conversation. Give it everything it needs: the repo path on the

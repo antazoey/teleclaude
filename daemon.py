@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["brotli>=1.1", "httpx>=0.27"]
+# dependencies = ["brotli>=1.1", "httpx>=0.27", "pygments>=2.17", "text-unicoder>=1.3"]
 # ///
 """teleclaude daemon: runs Claude Code on this machine and relays each turn over a channel."""
 
@@ -132,8 +132,10 @@ DEFAULT_CLAUDE_BIN = Path.home() / ".local/bin/claude"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude/projects"
 CLEAN_SHOW_ONLY_WORDS = ("--only-show", "--show", "show")
 CLEAN_STALE_HOURS = 25
+SHOW_MAX_LINES = 400
+SHOW_PATTERN = re.compile(r"^(.*?)(?::(\d+)(?:-(\d+))?)?$")
 DEFAULT_UV_BIN = Path.home() / ".local/bin/uv"
-TEST_COMMAND = ("run", "--with", "brotli", "--with", "httpx", "--with", "telethon", "--with", "textual", "--with", "pytest", "--with", "pytest-asyncio", "--with", "pytest-mock", "pytest", "-q")
+TEST_COMMAND = ("run", "--with", "brotli", "--with", "httpx", "--with", "pygments", "--with", "telethon", "--with", "text-unicoder", "--with", "textual", "--with", "pytest", "--with", "pytest-asyncio", "--with", "pytest-mock", "pytest", "-q")
 PREFLIGHT_PYTHON_PREFIX = "python: "
 CHECK_TIMEOUT_SECONDS = 600
 CHECK_OUTPUT_CHARS = 1500
@@ -158,6 +160,7 @@ Messages sent while one is running fire straight away; Claude interleaves them i
 /patient [on|off|auto] - long waits get an hour without progress and a 10m nudge
 /timeout [on|off] - turn the no-progress timeout off entirely
 /diff [path] - open the diff viewer, e.g. /diff org/repo/my-branch
+/show <path>[:start[-end]] - send a file or a line range as highlighted code
 /clean [--only-show] - show the last cleanup run, then start one
 /upgrade - test the edited daemon and restart onto it
 /help - this message"""
@@ -457,7 +460,7 @@ class Session:
         return True
 
 
-def claude_command(session, claude_bin, skip_permissions):
+def claude_command(session, claude_bin, skip_permissions, reply_prompt=None):
     """The long-lived streaming process backing one conversation."""
     command = [
         claude_bin,
@@ -476,6 +479,9 @@ def claude_command(session, claude_bin, skip_permissions):
 
     if skip_permissions:
         command.append("--dangerously-skip-permissions")
+
+    if reply_prompt:
+        command += ["--append-system-prompt", reply_prompt]
 
     return command
 
@@ -629,7 +635,7 @@ class Daemon:
 
         kind = protocol.FINAL if final else protocol.PROGRESS
         for message in protocol.encode_parts(request.protocol_id, text, kind, self.channel.max_message_chars):
-            await self.channel.send(request.chat_id, message, reply_to=reply_to)
+            await self.channel.send(request.chat_id, message, reply_to=reply_to, verbatim=True)
 
     async def handle_command(self, request, text):
         name, _, argument = text.partition(" ")
@@ -680,6 +686,9 @@ class Daemon:
 
         elif name == "/diff":
             await self.open_diff_viewer(request, argument)
+
+        elif name == "/show":
+            await self.reply(request, self.show_file(argument))
 
         elif name == "/upgrade":
             await self.upgrade(request)
@@ -888,6 +897,33 @@ class Daemon:
 
         return " ".join(parts)
 
+    def show_file(self, argument):
+        """A file, or a line range of it, as a fenced block the channel renders as code."""
+        path_text, first, last = SHOW_PATTERN.match(argument).groups()
+        if not path_text:
+            return "Usage: /show <path>[:start[-end]]"
+
+        target = Path(path_text).expanduser()
+        if not target.is_absolute():
+            target = self.session.cwd / target
+
+        if not target.is_file():
+            return f"Not a file: {target}"
+
+        lines = target.read_text(errors="replace").rstrip("\n").split("\n")
+        start = int(first) if first else 1
+        end = min(int(last) if last else start + SHOW_MAX_LINES - 1, len(lines))
+        if start > end:
+            return f"{path_text} has {len(lines)} lines."
+
+        excerpt = "\n".join(lines[start - 1:end])
+        fence = "`" * max(3, max((len(run) for run in re.findall(r"`+", excerpt)), default=0) + 1)
+        shown = f"{fence} {path_text}:{start}\n{excerpt}\n{fence}"
+        if end < len(lines) and not last:
+            shown += f"\nLines {start}-{end} of {len(lines)}. /show {path_text}:{end + 1} for more."
+
+        return shown
+
     async def change_directory(self, request, argument):
         if not argument:
             await self.reply(request, "Usage: /cd <path>")
@@ -1022,7 +1058,7 @@ class Daemon:
         if self.session.running:
             return
 
-        command = claude_command(self.session, self.claude_bin, self.skip_permissions)
+        command = claude_command(self.session, self.claude_bin, self.skip_permissions, self.channel.reply_prompt)
         self.session.process = await asyncio.create_subprocess_exec(
             *command,
             cwd=self.session.cwd,
