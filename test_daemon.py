@@ -175,6 +175,21 @@ def test_user_message_flags_an_image_even_without_a_caption():
 
 
 @pytest.mark.asyncio
+async def test_handle_voice_turn_prompts_with_the_transcription(mocker):
+    mocker.patch.object(daemon, "transcribe", lambda audio, model_name: {b"speech": "ship it", b"hiss": ""}[audio])
+    channel = mocker.AsyncMock()
+    service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
+    handle_turn = mocker.patch.object(service, "handle_turn", mocker.AsyncMock())
+
+    await service.handle(Inbound(7, "on main", 1, voices=(b"speech", b"hiss")))
+    await service.handle(Inbound(7, "", 2, voices=(b"hiss",)))
+
+    handle_turn.assert_awaited_once()
+    assert handle_turn.await_args.args[1] == "The user has sent a voice memo. Here is the transcription: 'ship it'\n\non main"
+    assert sent_texts(channel) == [f"{daemon.WORKING_PREFIX}> 🎤 ship it", daemon.NO_SPEECH_REPLY]
+
+
+@pytest.mark.asyncio
 async def test_buffer_inbound_coalesces_a_split_message_into_one_prompt(mocker):
     mocker.patch.object(daemon, "COALESCE_WINDOW_SECONDS", 0.02)
     service = daemon.Daemon(mocker.AsyncMock(), daemon.Session("/tmp"), "claude", True)

@@ -61,6 +61,7 @@ class Inbound(NamedTuple):
     message_id: int | str | None
     images: tuple = ()
     reply_quote: str | None = None
+    voices: tuple = ()
 
 
 class TeleclaudeChannelReceiver(ABC):
@@ -190,7 +191,7 @@ class TelegramChannelReceiver(TeleclaudeChannelReceiver):
             return None
 
         text = message.get("text") or message.get("caption") or ""
-        if not text and not self.image_file(message):
+        if not text and not self.image_file(message) and not self.voice_file_id(message):
             return None
 
         chat_id = message["chat"]["id"]
@@ -208,7 +209,8 @@ class TelegramChannelReceiver(TeleclaudeChannelReceiver):
 
         replied = message.get("reply_to_message") or {}
         reply_quote = replied.get("text") or replied.get("caption")
-        return Inbound(chat_id, text, message.get("message_id"), await self.collect_images(message), reply_quote)
+        images = await self.collect_images(message)
+        return Inbound(chat_id, text, message.get("message_id"), images, reply_quote, await self.collect_voices(message))
 
     def image_file(self, message):
         """The Telegram file id and media type of an attached image, or None."""
@@ -232,6 +234,26 @@ class TelegramChannelReceiver(TeleclaudeChannelReceiver):
         file_id, media_type = found
         data = await self.download_file(file_id)
         return ({"media_type": media_type, "data": base64.b64encode(data).decode()},)
+
+    def voice_file_id(self, message):
+        """The Telegram file id of an attached voice memo or audio file, or None."""
+        for kind in ("voice", "audio"):
+            if message.get(kind):
+                return message[kind]["file_id"]
+
+        document = message.get("document") or {}
+        if document.get("mime_type", "").startswith("audio/"):
+            return document["file_id"]
+
+        return None
+
+    async def collect_voices(self, message):
+        """The raw bytes of an attached voice memo or audio file, empty when none."""
+        file_id = self.voice_file_id(message)
+        if not file_id:
+            return ()
+
+        return (await self.download_file(file_id),)
 
     async def download_file(self, file_id):
         """The raw bytes of a Telegram file by id."""

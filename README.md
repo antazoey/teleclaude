@@ -100,6 +100,8 @@ Needs Python 3.11+, [uv](https://docs.astral.sh/uv/) and Claude Code on the serv
 
 Any plain message is a Claude turn in the daemon's current directory. Tool calls stream back as
 short narrated lines, then the answer arrives as a reply to your message.
+Photos and voice memos work too: voice is transcribed on the server with a local Whisper model
+(`daemon.whisper_model`, default `small`), echoed back, and handed to Claude as text.
 
 - `/new` fresh conversation
 - `/cd <path>` change directory (fresh conversation)
@@ -147,8 +149,8 @@ conversation, directory, model and debug flag.
 
 ## Tests
 
-    uv run --with brotli --with httpx --with pygments --with telethon --with text-unicoder \
-      --with textual --with pytest --with pytest-asyncio --with pytest-mock pytest -q
+    uv run --with brotli --with faster-whisper --with httpx --with pygments --with telethon \
+      --with text-unicoder --with textual --with pytest --with pytest-asyncio --with pytest-mock pytest -q
 
 ## Security
 

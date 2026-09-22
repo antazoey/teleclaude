@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["brotli>=1.1", "httpx>=0.27", "pygments>=2.17", "text-unicoder>=1.3"]
+# dependencies = ["brotli>=1.1", "faster-whisper>=1.1", "httpx>=0.27", "pygments>=2.17", "text-unicoder>=1.3"]
 # ///
 """teleclaude daemon: runs Claude Code on this machine and relays each turn over a channel."""
 
@@ -8,6 +8,7 @@ import asyncio
 import calendar
 import hashlib
 import hmac
+import io
 import json
 import os
 import random
@@ -138,7 +139,11 @@ CLEAN_STALE_HOURS = 25
 SHOW_MAX_LINES = 400
 SHOW_PATTERN = re.compile(r"^(.*?)(?::(\d+)(?:-(\d+))?)?$")
 DEFAULT_UV_BIN = Path.home() / ".local/bin/uv"
-TEST_COMMAND = ("run", "--with", "brotli", "--with", "httpx", "--with", "pygments", "--with", "telethon", "--with", "text-unicoder", "--with", "textual", "--with", "pytest", "--with", "pytest-asyncio", "--with", "pytest-mock", "pytest", "-q")
+DEFAULT_WHISPER_MODEL = "small"
+VOICE_NOTE = "The user has sent a voice memo. Here is the transcription: '{transcript}'"
+NO_SPEECH_REPLY = "Couldn't make out any speech in that voice memo."
+WHISPER_MODELS = {}
+TEST_COMMAND = ("run", "--with", "brotli", "--with", "faster-whisper", "--with", "httpx", "--with", "pygments", "--with", "telethon", "--with", "text-unicoder", "--with", "textual", "--with", "pytest", "--with", "pytest-asyncio", "--with", "pytest-mock", "pytest", "-q")
 PREFLIGHT_PYTHON_PREFIX = "python: "
 CHECK_TIMEOUT_SECONDS = 600
 CHECK_OUTPUT_CHARS = 1500
@@ -497,6 +502,22 @@ def compose_prompt(prompt, reply_quote):
     return f"[The user is replying to this earlier message:]\n> {reply_quote}\n\n{prompt}"
 
 
+def compose_voice_prompt(prompt, transcripts):
+    notes = [VOICE_NOTE.format(transcript=transcript) for transcript in transcripts]
+    return "\n\n".join([*notes, prompt] if prompt else notes)
+
+
+def transcribe(audio, model_name):
+    # Imported on first use, since loading it is slow.
+    from faster_whisper import WhisperModel
+
+    if model_name not in WHISPER_MODELS:
+        WHISPER_MODELS[model_name] = WhisperModel(model_name, device="cpu", compute_type="int8")
+
+    segments, _ = WHISPER_MODELS[model_name].transcribe(io.BytesIO(audio), vad_filter=True)
+    return " ".join(segment.text.strip() for segment in segments).strip()
+
+
 def image_block(image):
     return {"type": "image", "source": {"type": "base64", "media_type": image["media_type"], "data": image["data"]}}
 
@@ -601,6 +622,7 @@ class Daemon:
         self.stream_idle = True
         self.idle_since = None
         self.coalescing = {}
+        self.transcribe_lock = asyncio.Lock()
 
     def spawn(self, coro):
         task = asyncio.create_task(coro)
@@ -624,11 +646,12 @@ class Daemon:
         """Hold a plain message briefly so a Telegram-split (or a quick burst) becomes one prompt."""
         buf = self.coalescing.get(inbound.chat_id)
         if buf is None:
-            buf = {"texts": [], "images": [], "message_id": inbound.message_id, "reply_quote": None}
+            buf = {"texts": [], "images": [], "voices": [], "message_id": inbound.message_id, "reply_quote": None}
             self.coalescing[inbound.chat_id] = buf
         if inbound.text:
             buf["texts"].append(inbound.text)
         buf["images"].extend(inbound.images)
+        buf["voices"].extend(inbound.voices)
         if inbound.reply_quote and not buf["reply_quote"]:
             buf["reply_quote"] = inbound.reply_quote
         if buf.get("timer"):
@@ -646,7 +669,7 @@ class Daemon:
             return
 
         combined = Inbound(chat_id, "\n".join(buf["texts"]), buf["message_id"],
-                           tuple(buf["images"]), buf["reply_quote"])
+                           tuple(buf["images"]), buf["reply_quote"], tuple(buf["voices"]))
         await self.handle(combined)
 
     async def handle(self, inbound):
@@ -664,10 +687,29 @@ class Daemon:
                 await self.handle_command(request, text)
             elif is_stop_request(text):
                 await self.reply(request, self.stop_everything())
+            elif inbound.voices:
+                await self.handle_voice_turn(request, text, inbound)
             else:
                 await self.handle_turn(request, text, inbound.images, inbound.reply_quote)
         except Exception as error:
             await self.reply(request, f"daemon error: {error}")
+
+    async def handle_voice_turn(self, request, text, inbound):
+        await self.channel.send_typing(request.chat_id)
+        transcripts = [transcript for transcript in await self.transcribe_voices(inbound.voices) if transcript]
+        if not transcripts and not text and not inbound.images:
+            await self.reply(request, NO_SPEECH_REPLY)
+            return
+
+        for transcript in transcripts:
+            await self.reply(request, f"> 🎤 {transcript}", final=False)
+
+        await self.handle_turn(request, compose_voice_prompt(text, transcripts), inbound.images, inbound.reply_quote)
+
+    async def transcribe_voices(self, voices):
+        model_name = self.config.get("daemon.whisper_model", "TELECLAUDE_WHISPER_MODEL", default=DEFAULT_WHISPER_MODEL)
+        async with self.transcribe_lock:
+            return [await asyncio.to_thread(transcribe, audio, model_name) for audio in voices]
 
     async def reply(self, request, text, final=True):
         """Answers in the form the request came in: plain text, or protocol envelopes."""

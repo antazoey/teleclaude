@@ -30,6 +30,9 @@ claude_bin = "~/.local/bin/claude"
 skip_permissions = true
 # Raw tool input instead of plain descriptions. Env: TELECLAUDE_DEBUG.
 debug = false
+# Local Whisper model for voice memos: tiny, base, small, medium or large-v3. Bigger is slower
+# and more accurate. Env: TELECLAUDE_WHISPER_MODEL.
+# whisper_model = "small"
 
 # Optional /diff: a web viewer that checks an HMAC-signed expiry.
 # Env: TELECLAUDE_DIFF_URL, TELECLAUDE_DIFF_AUTH_KEY.
