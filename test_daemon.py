@@ -175,6 +175,58 @@ def test_user_message_flags_an_image_even_without_a_caption():
 
 
 @pytest.mark.asyncio
+async def test_buffer_inbound_coalesces_a_split_message_into_one_prompt(mocker):
+    mocker.patch.object(daemon, "COALESCE_WINDOW_SECONDS", 0.02)
+    service = daemon.Daemon(mocker.AsyncMock(), daemon.Session("/tmp"), "claude", True)
+    handled = []
+
+    async def fake_handle(inb): handled.append(inb)
+
+    mocker.patch.object(service, "handle", fake_handle)
+    image = {"media_type": "image/jpeg", "data": "QUJD"}
+    service.buffer_inbound(Inbound(7, "part one", 100, (image,)))
+    service.buffer_inbound(Inbound(7, "part two", 101))
+    await asyncio.sleep(0.05)
+
+    assert len(handled) == 1
+    assert handled[0].text == "part one\npart two"
+    assert handled[0].images == (image,)
+    assert handled[0].message_id == 100
+
+
+@pytest.mark.asyncio
+async def test_buffer_inbound_splits_when_a_gap_separates_messages(mocker):
+    mocker.patch.object(daemon, "COALESCE_WINDOW_SECONDS", 0.02)
+    service = daemon.Daemon(mocker.AsyncMock(), daemon.Session("/tmp"), "claude", True)
+    handled = []
+
+    async def fake_handle(inb): handled.append(inb)
+
+    mocker.patch.object(service, "handle", fake_handle)
+    service.buffer_inbound(Inbound(7, "first", 100))
+    await asyncio.sleep(0.05)  # window elapses, flushes
+    service.buffer_inbound(Inbound(7, "second", 101))
+    await asyncio.sleep(0.05)
+
+    assert [h.text for h in handled] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_route_inbound_sends_commands_and_stops_past_the_buffer(mocker):
+    mocker.patch.object(daemon, "COALESCE_WINDOW_SECONDS", 0.02)
+    service = daemon.Daemon(mocker.AsyncMock(), daemon.Session("/tmp"), "claude", True)
+    handled = mocker.patch.object(service, "handle", mocker.AsyncMock())
+
+    for text in ("a long paste", "/stop", "stop", "tail of the paste"):
+        service.route_inbound(Inbound(7, text, 100))
+    await asyncio.sleep(0)
+
+    assert [call.args[0].text for call in handled.await_args_list] == ["/stop", "stop"]
+    await asyncio.sleep(0.05)
+    assert handled.await_args_list[-1].args[0].text == "a long paste\ntail of the paste"
+
+
+@pytest.mark.asyncio
 async def test_handle_answers_an_envelope_in_kind(mocker):
     channel = mocker.AsyncMock(max_message_chars=200)
     service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)

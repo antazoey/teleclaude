@@ -21,14 +21,9 @@ in the user's chat with the daemon.
 
 ## A pasted prompt may arrive split
 
-Telegram caps a message at 4096 characters. Historically the daemon treated each piece of a
-split paste as its own task: the first chunk ran, the tail queued behind it ("this makes you
-2nd in line"), and the tail then ran on its own, out of context. The daemon is being fixed to
-coalesce consecutive messages into one prompt.
-
-If the user reports a queued or out-of-context tail, that is this bug, not `/stop` failing.
-`/stop` then `/new` clears it. Only fall back to splitting the work into a shorter prompt while
-the daemon still lacks coalescing; once it buffers, send the whole thing.
+Telegram caps a message at 4096 characters and splits longer pastes. The daemon coalesces messages
+that arrive within a moment of each other into one prompt, so send the whole thing. Commands and
+stop requests skip that buffer and act immediately.
 
 ## Writing the prompt
 

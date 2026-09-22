@@ -25,7 +25,7 @@ from typing import NamedTuple
 import httpx
 
 import protocol
-from channels import RECEIVERS, find_channel
+from channels import Inbound, RECEIVERS, find_channel
 from config import Config
 
 VERSION = "0.0.7"
@@ -79,6 +79,9 @@ STREAM_CHUNK_BYTES = 1024 * 1024
 DIFF_LINK_TTL_SECONDS = 12 * 3600
 HEARTBEAT_SECONDS = 60
 HEARTBEAT_TICK_SECONDS = 1
+# Telegram splits a long message into several updates that arrive together; gather
+# everything within this window into one prompt, and only split on a real pause.
+COALESCE_WINDOW_SECONDS = 1.5
 # A folded turn answers several prompts with one result, orphaning the rest of the queue.
 IDLE_DRAIN_SECONDS = 15
 PATIENT_HEARTBEAT_SECONDS = 600
@@ -597,14 +600,54 @@ class Daemon:
         self.recent_progress = deque(maxlen=PROGRESS_WINDOW)
         self.stream_idle = True
         self.idle_since = None
+        self.coalescing = {}
+
+    def spawn(self, coro):
+        task = asyncio.create_task(coro)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        return task
 
     async def run(self):
-        heartbeat = asyncio.create_task(self.heartbeat_forever())
-        self.tasks.add(heartbeat)
+        self.spawn(self.heartbeat_forever())
         async for inbound in self.channel.receive():
-            task = asyncio.create_task(self.handle(inbound))
-            self.tasks.add(task)
-            task.add_done_callback(self.tasks.discard)
+            self.route_inbound(inbound)
+
+    def route_inbound(self, inbound):
+        text = (inbound.text or "").strip()
+        if protocol.decode(text) or text.startswith("/") or is_stop_request(text):
+            self.spawn(self.handle(inbound))  # TUI envelopes reassemble themselves
+        else:
+            self.buffer_inbound(inbound)
+
+    def buffer_inbound(self, inbound):
+        """Hold a plain message briefly so a Telegram-split (or a quick burst) becomes one prompt."""
+        buf = self.coalescing.get(inbound.chat_id)
+        if buf is None:
+            buf = {"texts": [], "images": [], "message_id": inbound.message_id, "reply_quote": None}
+            self.coalescing[inbound.chat_id] = buf
+        if inbound.text:
+            buf["texts"].append(inbound.text)
+        buf["images"].extend(inbound.images)
+        if inbound.reply_quote and not buf["reply_quote"]:
+            buf["reply_quote"] = inbound.reply_quote
+        if buf.get("timer"):
+            buf["timer"].cancel()
+        buf["timer"] = self.spawn(self.flush_coalesced(inbound.chat_id))
+
+    async def flush_coalesced(self, chat_id):
+        try:
+            await asyncio.sleep(COALESCE_WINDOW_SECONDS)
+        except asyncio.CancelledError:
+            return
+
+        buf = self.coalescing.pop(chat_id, None)
+        if not buf:
+            return
+
+        combined = Inbound(chat_id, "\n".join(buf["texts"]), buf["message_id"],
+                           tuple(buf["images"]), buf["reply_quote"])
+        await self.handle(combined)
 
     async def handle(self, inbound):
         request = Request(inbound.chat_id, inbound.message_id)
