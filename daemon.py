@@ -28,7 +28,7 @@ import protocol
 from channels import Inbound, RECEIVERS, find_channel
 from config import Config
 
-VERSION = "0.0.7"
+VERSION = "0.0.8"
 WORKING_PREFIX = "⚙️ "
 DEPLOY_LOG = Path.home() / ".config/teleclaude/deploy.log"
 SASSY_RESPONSES = (
