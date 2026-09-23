@@ -307,7 +307,7 @@ class TelegramChannelSender(TeleclaudeChannelSender):
     @classmethod
     def from_config(cls, config):
         settings = {
-            "telegram.api_id": config.get("telegram.api_id", "TELEGRAM_API_ID"),
+            "telegram.api_id": config.get("telegram.api_id", "TELEGRAM_API_ID", "TELECLAUDE_APP_ID"),
             "telegram.api_hash": config.get("telegram.api_hash", "TELEGRAM_API_HASH", "TELEGRAM_API_KEY"),
             "telegram.bot_username": config.get("telegram.bot_username", "TELEGRAM_BOT_USERNAME"),
         }

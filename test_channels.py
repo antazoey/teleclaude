@@ -1,4 +1,5 @@
 import base64
+import os
 
 import pytest
 
@@ -88,3 +89,12 @@ def test_find_channel_defaults_to_telegram_and_rejects_unknown_names():
 
     with pytest.raises(SystemExit, match="Registered: telegram"):
         find_channel(RECEIVERS, Config({"channel": "carrier-pigeon"}))
+
+
+def test_sender_from_config_reads_the_app_id_and_key_aliases(mocker):
+    environment = {"TELECLAUDE_APP_ID": "12345678", "TELEGRAM_API_KEY": "0123456789abcdef0123456789abcdef"}
+    mocker.patch.dict(os.environ, environment, clear=True)
+
+    sender = TelegramChannelSender.from_config(Config({"telegram": {"bot_username": "@my_bot"}}))
+
+    assert (sender.api_id, sender.api_hash, sender.bot_username) == (12345678, environment["TELEGRAM_API_KEY"], "my_bot")

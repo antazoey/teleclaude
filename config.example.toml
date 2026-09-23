@@ -12,7 +12,8 @@ bot_token = "123456:ABC-your-token-here"
 # user_id = 123456789
 
 # Client side: the bot to talk to, and your app credentials from https://my.telegram.org/apps.
-# Env: TELEGRAM_BOT_USERNAME, TELEGRAM_API_ID, TELEGRAM_API_HASH (or TELEGRAM_API_KEY).
+# Env: TELEGRAM_BOT_USERNAME, TELEGRAM_API_ID (or TELECLAUDE_APP_ID), TELEGRAM_API_HASH (or
+# TELEGRAM_API_KEY).
 bot_username = "your_teleclaude_bot"
 api_id = 12345678
 api_hash = "0123456789abcdef0123456789abcdef"
