@@ -3,6 +3,7 @@ import hashlib
 import json
 import hmac
 import re
+import subprocess
 import time
 import tomllib
 import urllib.parse
@@ -300,8 +301,10 @@ async def test_upgrade_restarts_only_when_every_check_passes(mocker):
     restart.assert_called_once_with(7, "/envs/new/bin/python3")
 
 
-def test_boot_greeting_announces_the_running_version():
-    assert daemon.boot_greeting() == f"Hello! This is teleclaude v{daemon.VERSION}, up on the new code."
+def test_boot_greeting_announces_the_running_version_and_changes():
+    hello = f"Hello! This is teleclaude v{daemon.VERSION}, up on the new code."
+    assert daemon.boot_greeting() == hello
+    assert daemon.boot_greeting(["Add /show", "Fix a typo"]) == f"{hello}\n\nWhat's new:\n- Add /show\n- Fix a typo"
 
 
 def test_record_deploy_appends_a_line_per_boot(mocker, tmp_path):
@@ -309,11 +312,36 @@ def test_record_deploy_appends_a_line_per_boot(mocker, tmp_path):
     mocker.patch.object(daemon, "DEPLOY_LOG", log)
 
     daemon.record_deploy("0.0.6")
-    daemon.record_deploy("0.0.7")
+    daemon.record_deploy("0.0.7", "abc123")
 
     lines = log.read_text().splitlines()
     assert len(lines) == 2
-    assert lines[0].endswith(" v0.0.6") and lines[1].endswith(" v0.0.7")
+    assert lines[0].endswith(" v0.0.6") and lines[1].endswith(" v0.0.7 abc123")
+
+
+@pytest.mark.asyncio
+async def test_list_changes_since_the_deployed_rev(mocker, tmp_path):
+    log = tmp_path / "deploy.log"
+    mocker.patch.object(daemon, "DEPLOY_LOG", log)
+    mocker.patch.object(daemon, "PROJECT_DIR", tmp_path)
+
+    def commit(subject, filename):
+        (tmp_path / filename).write_text(subject)
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", subject], cwd=tmp_path, check=True)
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    commit("teleclaude v0.0.1", "daemon.py")
+    commit("Add voice memos", "channels.py")
+    commit("teleclaude v0.0.2", "daemon.py")
+    head_rev = await daemon.git_output("rev-parse", "HEAD")
+    commit("Fix a typo", "README.md")
+
+    log.write_text("2026-09-18T15:37:30+00:00 v0.0.1\n")
+    assert await daemon.list_changes(await daemon.find_deployed_rev()) == ["Add voice memos", "Edits to daemon.py", "Fix a typo"]
+
+    daemon.record_deploy("0.0.2", head_rev)
+    assert await daemon.list_changes(await daemon.find_deployed_rev()) == ["Fix a typo"]
 
 
 def test_bump_version_increments_the_patch(mocker, tmp_path):

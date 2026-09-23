@@ -32,6 +32,7 @@ from config import Config
 VERSION = "0.0.7"
 WORKING_PREFIX = "⚙️ "
 DEPLOY_LOG = Path.home() / ".config/teleclaude/deploy.log"
+DEPLOY_COMMIT_PATTERN = re.compile(r"^teleclaude v\d+\.\d+\.\d+$")
 SASSY_RESPONSES = (
     "ok! Let me get started…",
     "thinking…",
@@ -1233,16 +1234,54 @@ class Daemon:
         return dropped
 
 
-def boot_greeting():
-    return f"Hello! This is teleclaude v{VERSION}, up on the new code."
+def boot_greeting(changes=()):
+    greeting = f"Hello! This is teleclaude v{VERSION}, up on the new code."
+    if changes:
+        greeting += "\n\nWhat's new:\n" + "\n".join(f"- {change}" for change in changes)
+
+    return greeting
 
 
-def record_deploy(version, when=None):
+def record_deploy(version, rev=None, when=None):
     """Append this boot to the deploy log so what is live, and since when, is always auditable."""
     stamp = (when or datetime.now(timezone.utc)).isoformat(timespec="seconds")
     DEPLOY_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(DEPLOY_LOG, "a") as handle:
-        handle.write(f"{stamp} v{version}\n")
+        handle.write(" ".join(filter(None, (stamp, f"v{version}", rev))) + "\n")
+
+
+async def git_output(*args):
+    passed, output = await run_check(["git", *args])
+    return output.strip() if passed else None
+
+
+async def find_deployed_rev():
+    """The commit the previous boot ran, from the deploy log or else its version's deploy commit."""
+    lines = DEPLOY_LOG.read_text().splitlines() if DEPLOY_LOG.exists() else []
+    if not lines:
+        return None
+
+    fields = lines[-1].split()
+    if len(fields) >= 3:
+        return fields[2]
+
+    return await git_output("log", "-1", "--format=%H", f"--grep=^teleclaude {fields[1]}$") or None
+
+
+async def list_changes(since_rev):
+    """Subjects of the commits after `since_rev`, oldest first; deploy commits list the files they touched."""
+    log = await git_output("log", "--no-merges", "--reverse", "--format=%H %s", f"{since_rev}..HEAD")
+    changes = []
+    for line in (log or "").splitlines():
+        rev, _, subject = line.partition(" ")
+        if DEPLOY_COMMIT_PATTERN.match(subject):
+            touched = await git_output("diff-tree", "--no-commit-id", "--name-only", "-r", rev)
+            subject = f"Edits to {', '.join(touched.split())}" if touched else None
+
+        if subject:
+            changes.append(subject)
+
+    return changes
 
 
 def bump_version():
@@ -1305,10 +1344,13 @@ async def main(preflight=False):
             print(f"{PREFLIGHT_PYTHON_PREFIX}{sys.executable}", flush=True)
             return
 
-        record_deploy(VERSION)
+        previous_rev = await find_deployed_rev()
+        head_rev = await git_output("rev-parse", "HEAD")
+        changes = await list_changes(previous_rev) if previous_rev and head_rev else []
+        record_deploy(VERSION, head_rev)
         print(f"{identity} v{VERSION} listening on {receiver_class.name}, cwd={workdir}, claude={claude_bin}", flush=True)
         if restarted["chat"]:
-            await channel.send(parse_chat_id(restarted["chat"]), boot_greeting())
+            await channel.send(parse_chat_id(restarted["chat"]), boot_greeting(changes))
 
         await daemon.run()
 
