@@ -283,9 +283,10 @@ async def test_handle_turn_does_not_wait_for_the_running_prompt(mocker):
 
 
 @pytest.mark.asyncio
-async def test_upgrade_restarts_only_when_every_check_passes(mocker):
+async def test_upgrade_restarts_only_when_every_check_passes(mocker, tmp_path):
     run_check = mocker.patch.object(daemon, "run_check", return_value=(False, "2 failed, 1 passed"))
     restart = mocker.patch.object(daemon.Daemon, "restart")
+    mocker.patch.object(daemon, "PROJECT_DIR", tmp_path)
     channel = mocker.AsyncMock()
     service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
 
@@ -296,6 +297,12 @@ async def test_upgrade_restarts_only_when_every_check_passes(mocker):
 
     # The restart runs under the interpreter the preflight reported.
     run_check.return_value = (True, f"Installed 2 packages\npreflight ok\n{daemon.PREFLIGHT_PYTHON_PREFIX}/envs/new/bin/python3\n")
+    await service.upgrade(PLAIN_REQUEST)
+
+    restart.assert_not_called()
+    assert daemon.CHANGE_NOTES_NAME in sent_texts(channel)[-1]
+
+    (tmp_path / daemon.CHANGE_NOTES_NAME).write_text("- Replies reach you after a wakeup\n")
     await service.upgrade(PLAIN_REQUEST)
 
     restart.assert_called_once_with(7, "/envs/new/bin/python3")
@@ -333,12 +340,18 @@ async def test_list_changes_since_the_deployed_rev(mocker, tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     commit("teleclaude v0.0.1", "daemon.py")
     commit("Add voice memos", "channels.py")
-    commit("teleclaude v0.0.2", "daemon.py")
+    commit(daemon.deploy_message("0.0.2", ["Replies reach you after a wakeup", "Stop is faster"]), "daemon.py")
     head_rev = await daemon.git_output("rev-parse", "HEAD")
+    commit("teleclaude v0.0.3", "daemon.py")
     commit("Fix a typo", "README.md")
 
     log.write_text("2026-09-18T15:37:30+00:00 v0.0.1\n")
-    assert await daemon.list_changes(await daemon.find_deployed_rev()) == ["Add voice memos", "Edits to daemon.py", "Fix a typo"]
+    assert await daemon.list_changes(await daemon.find_deployed_rev()) == [
+        "Add voice memos",
+        "Replies reach you after a wakeup",
+        "Stop is faster",
+        "Fix a typo",
+    ]
 
     daemon.record_deploy("0.0.2", head_rev)
     assert await daemon.list_changes(await daemon.find_deployed_rev()) == ["Fix a typo"]
@@ -354,7 +367,7 @@ def test_bump_version_increments_the_patch(mocker, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_publish_upgrade_bumps_version_then_commits_and_pushes(mocker):
+async def test_publish_upgrade_bumps_version_then_commits_and_pushes(mocker, tmp_path):
     service = daemon.Daemon(mocker.AsyncMock(), daemon.Session("/tmp"), "claude", True)
     mocker.patch.object(daemon, "bump_version", return_value="9.9.9")
     calls = []
@@ -364,12 +377,16 @@ async def test_publish_upgrade_bumps_version_then_commits_and_pushes(mocker):
         return (command[:3] != ["git", "diff", "--cached"]), ""
 
     mocker.patch.object(daemon, "run_check", fake_run_check)
+    mocker.patch.object(daemon, "PROJECT_DIR", tmp_path)
+    notes = tmp_path / daemon.CHANGE_NOTES_NAME
+    notes.write_text("- Replies reach you after a wakeup\n\nStop is faster\n")
     status = await service.publish_upgrade()
 
     assert ["git", "add", "-A"] in calls
-    assert ["git", "commit", "-m", "teleclaude v9.9.9"] in calls
+    assert ["git", "commit", "-m", "Replies reach you after a wakeup (v9.9.9)\n\n- Stop is faster"] in calls
     assert ["git", "push"] in calls
     assert "9.9.9" in status
+    assert not notes.exists()
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ When a message arrives over a channel, this is the daemon you are running inside
 
 - Changes to `daemon.py`, `channels.py`, `protocol.py`, `config.py` or `teleclaude.py` need a matching test.
 - Never restart the daemon yourself. Editing the files is the whole job.
+- Every edit that changes behavior adds a line to `CHANGES.pending` (gitignored, one `- ` bullet per change). Write what the user will notice in Telegram, never which files changed: "Replies from wakeups and background agents now reach the chat", not "Edits to daemon.py". `/upgrade` refuses edits with no entry and writes the deploy commit from them (first line as the subject, the rest as its body), and the boot greeting lists them. Put the most important change first.
 - Tell the user to send `/upgrade` when the edit is ready. That runs the tests, preflights the new
   code under `uv` so new dependencies resolve, and restarts onto it.
 - Secrets and machine-specific values (hosts, bot names, paths) belong in the config, never in code.

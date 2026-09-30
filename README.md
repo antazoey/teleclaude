@@ -147,6 +147,10 @@ boots the edited daemon under `uv` to prove it imports and reaches the channel. 
 failing leaves the running daemon untouched. Both passing restarts in place, keeping the
 conversation, directory, model and debug flag.
 
+Claude notes each user-visible change in `CHANGES.pending`. `/upgrade` refuses edits without one,
+writes the deploy commit from the notes (the first as its subject), and the boot greeting lists them
+as "What's new".
+
 ## Tests
 
     uv run --with brotli --with faster-whisper --with httpx --with pygments --with telethon \

@@ -29,10 +29,13 @@ import protocol
 from channels import Inbound, RECEIVERS, find_channel
 from config import Config
 
-VERSION = "0.0.8"
+VERSION = "0.0.9"
 WORKING_PREFIX = "⚙️ "
 DEPLOY_LOG = Path.home() / ".config/teleclaude/deploy.log"
 DEPLOY_COMMIT_PATTERN = re.compile(r"^teleclaude v\d+\.\d+\.\d+$")
+DEPLOY_VERSION_SUFFIX = re.compile(r" \(v\d+\.\d+\.\d+\)$")
+CHANGE_NOTES_NAME = "CHANGES.pending"
+CHANGE_NOTE_BULLET = "- "
 SASSY_RESPONSES = (
     "ok! Let me get started…",
     "thinking…",
@@ -924,6 +927,10 @@ class Daemon:
             await self.reply(request, "Busy. /stop first, then /upgrade.")
             return
 
+        if await git_output("status", "--porcelain") and not read_change_notes():
+            await self.reply(request, f"No {CHANGE_NOTES_NAME} entry for these edits. Ask Claude to add one, then /upgrade.")
+            return
+
         await self.reply(request, "Checking the edited daemon…", final=False)
         python = sys.executable
         for name, command in upgrade_checks(resolve_uv_bin(self.config)):
@@ -948,9 +955,11 @@ class Daemon:
 
         version = bump_version()
         await run_check(["git", "add", "-A"])
-        committed, output = await run_check(["git", "commit", "-m", f"teleclaude v{version}"])
+        committed, output = await run_check(["git", "commit", "-m", deploy_message(version, read_change_notes())])
         if not committed:
             return f"Commit failed, deploying anyway.\n{output.strip()[-CHECK_OUTPUT_CHARS:]}"
+
+        (PROJECT_DIR / CHANGE_NOTES_NAME).unlink(missing_ok=True)
 
         pushed, output = await run_check(["git", "push"])
         if not pushed:
@@ -1282,18 +1291,36 @@ async def find_deployed_rev():
     return await git_output("log", "-1", "--format=%H", f"--grep=^teleclaude {fields[1]}$") or None
 
 
-async def list_changes(since_rev):
-    """Subjects of the commits after `since_rev`, oldest first; deploy commits list the files they touched."""
-    log = await git_output("log", "--no-merges", "--reverse", "--format=%H %s", f"{since_rev}..HEAD")
-    changes = []
-    for line in (log or "").splitlines():
-        rev, _, subject = line.partition(" ")
-        if DEPLOY_COMMIT_PATTERN.match(subject):
-            touched = await git_output("diff-tree", "--no-commit-id", "--name-only", "-r", rev)
-            subject = f"Edits to {', '.join(touched.split())}" if touched else None
+def read_change_notes():
+    """The user-visible changes waiting in `CHANGES.pending` for the next deploy."""
+    path = PROJECT_DIR / CHANGE_NOTES_NAME
+    lines = path.read_text().splitlines() if path.exists() else []
+    return [stripped.removeprefix(CHANGE_NOTE_BULLET) for stripped in map(str.strip, lines) if stripped]
 
-        if subject:
-            changes.append(subject)
+
+def deploy_message(version, notes):
+    """The first note as the subject, tagged with the version, and the rest as bullets in the body."""
+    if not notes:
+        return f"teleclaude v{version}"
+
+    subject = f"{notes[0]} (v{version})"
+    return "\n\n".join(filter(None, (subject, "\n".join(f"{CHANGE_NOTE_BULLET}{note}" for note in notes[1:]))))
+
+
+async def list_changes(since_rev):
+    """What changed after `since_rev`, oldest first: commit subjects, plus the notes in each deploy commit's body."""
+    log = await git_output("log", "--no-merges", "--reverse", "--format=%s%x00%b%x1e", f"{since_rev}..HEAD")
+    changes = []
+    for entry in (log or "").split("\x1e"):
+        subject, _, body = entry.strip().partition("\x00")
+        if not subject or DEPLOY_COMMIT_PATTERN.match(subject):
+            continue
+
+        changes.append(DEPLOY_VERSION_SUFFIX.sub("", subject))
+        if DEPLOY_VERSION_SUFFIX.search(subject):
+            changes.extend(
+                line.removeprefix(CHANGE_NOTE_BULLET) for line in body.splitlines() if line.startswith(CHANGE_NOTE_BULLET)
+            )
 
     return changes
 
