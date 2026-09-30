@@ -887,3 +887,18 @@ async def test_dispatch_keeps_the_stream_busy_while_tools_run(mocker):
 
     assert service.stream_idle is False
     assert service.drop_orphaned_replies() is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_reports_a_self_started_turn_to_the_last_chat(mocker):
+    channel = mocker.AsyncMock()
+    service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
+    service.last_chat_id = 7
+    service.stream_idle = True
+
+    await service.dispatch({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"description": "check the review"}}]}})
+    await service.dispatch({"type": "result", "result": "review findings"})
+
+    assert sent_texts(channel) == [f"{daemon.WORKING_PREFIX}checking the review…", "review findings"]
+    assert channel.send.call_args.kwargs["reply_to"] is None
+    assert not service.session.pending

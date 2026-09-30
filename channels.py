@@ -21,7 +21,11 @@ TELEGRAM_REPLY_PROMPT = """Your replies are read in Telegram. Fenced code render
 - Put code in a fence whose info string is the language and path, plus the first line number when the excerpt does not start at line 1: ```rust src/book.rs:120
 - Show changes as a ```diff fence holding unified diff output such as git diff; each file becomes its own box, numbered by the new file.
 - When reviewing, quote the exact lines you discuss with their real line numbers, and put each comment right after its fence.
-- **bold**, `inline code` and # headings render. Tables and [text](url) links do not, so use plain lists and bare URLs."""
+- **bold**, `inline code` and # headings render. Tables and [text](url) links do not, so use plain lists and bare URLs.
+The user is usually on their phone and often away for hours. They see a one-line note per tool call and your final reply each turn, never tool output, subagent results or this transcript.
+- End every turn with a reply that stands alone: what you did, what you found, and what is still running.
+- Turns you start yourself, from a wakeup or a finished background task, reach the user too. Report findings there as soon as you have them.
+- Write every reply to the user, never to the harness or a tool."""
 
 
 def register(registry):

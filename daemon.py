@@ -29,7 +29,7 @@ import protocol
 from channels import Inbound, RECEIVERS, find_channel
 from config import Config
 
-VERSION = "0.0.7"
+VERSION = "0.0.8"
 WORKING_PREFIX = "⚙️ "
 DEPLOY_LOG = Path.home() / ".config/teleclaude/deploy.log"
 DEPLOY_COMMIT_PATTERN = re.compile(r"^teleclaude v\d+\.\d+\.\d+$")
@@ -624,6 +624,7 @@ class Daemon:
         self.idle_since = None
         self.coalescing = {}
         self.transcribe_lock = asyncio.Lock()
+        self.last_chat_id = None
 
     def spawn(self, coro):
         task = asyncio.create_task(coro)
@@ -1045,6 +1046,7 @@ class Daemon:
                 await self.reply(request, f"> {summarize(prompt) or '[image]'}", final=False)
 
             self.session.pending.append(request)
+            self.last_chat_id = request.chat_id
             self.session.patient = mentions_long_wait(prompt)
             self.stream_idle = False
             self.idle_since = None
@@ -1182,6 +1184,7 @@ class Daemon:
         self.idle_since = time.monotonic() if self.stream_idle else None
 
         if event.get("type") == "assistant":
+            self.adopt_self_started_turn()
             for block in event.get("message", {}).get("content", []):
                 self.track_progress(block)
                 if block.get("type") == "tool_use":
@@ -1196,6 +1199,17 @@ class Daemon:
                 self.recent_progress.clear()
                 if self.session.pending:
                     await self.channel.send_typing(request.chat_id)
+
+    def adopt_self_started_turn(self):
+        """Reports a turn Claude began on its own, from a wakeup or a finished background task, to the last chat."""
+        if self.session.pending or self.last_chat_id is None:
+            return
+
+        self.session.pending.append(Request(self.last_chat_id, None))
+        self.turn_started_at = time.monotonic()
+        self.last_sent_at = self.turn_started_at
+        self.last_progress_at = self.turn_started_at
+        self.recent_progress.clear()
 
     def next_request(self):
         """The prompt this result answers, in the order they were sent."""
@@ -1338,6 +1352,7 @@ async def main(preflight=False):
         session = Session(workdir, model=model)
         session.session_id = restarted["session"] or None
         daemon = Daemon(channel, session, claude_bin, skip_permissions, debug, config)
+        daemon.last_chat_id = parse_chat_id(restarted["chat"]) if restarted["chat"] else None
 
         if preflight:
             print("preflight ok", flush=True)
