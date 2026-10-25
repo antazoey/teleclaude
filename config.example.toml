@@ -1,8 +1,11 @@
 # teleclaude config. Copy to ~/.config/teleclaude/config.toml (or point TELECLAUDE_CONFIG at it)
 # and chmod 600, since it holds secrets. Environment variables override every setting shown.
 
-# Which registered channel to use. telegram is the only one so far.
+# Which registered channel to use: telegram or minecraft.
 channel = "telegram"
+# Sends only ASCII, replacing or dropping everything else (emoji, curly quotes, dashes). On by
+# default for minecraft, whose chat font has no emoji. Env: TELECLAUDE_ASCII_ONLY.
+# ascii_only = false
 
 [telegram]
 # Daemon side: the bot token from @BotFather. Env: TELEGRAM_BOT_TOKEN or BOT_API_KEY.
@@ -18,6 +21,24 @@ bot_username = "your_teleclaude_bot"
 api_id = 12345678
 api_hash = "0123456789abcdef0123456789abcdef"
 # session = "~/.config/teleclaude/telegram"
+
+[minecraft]
+# Daemon side only: a Minecraft server's chat, read from its log and answered over RCON. Players
+# address Claude by starting a chat message with the prefix. Env: MINECRAFT_LOG,
+# MINECRAFT_RCON_HOST, MINECRAFT_RCON_PORT, MINECRAFT_RCON_PASSWORD, MINECRAFT_PREFIX.
+# log = "~/servers/minecraft/data/logs/latest.log"
+# rcon_host = "127.0.0.1"
+# rcon_port = 25575
+# rcon_password = "from server.properties"
+# prefix = "@claude"
+# The one player Claude answers. Left unset, the first player to use the prefix pairs and is
+# written to .env next to daemon.py. Env: MINECRAFT_USER_ID.
+# player = "your_minecraft_name"
+# Said once to every other player on their first join, with {player} filled in. Empty turns it
+# off. Env: MINECRAFT_GREETING.
+# greeting = "Hi {player}! I am Claude, let me know if I can help :)"
+# Where the greeted players are remembered. Env: MINECRAFT_GREETED.
+# greeted = "~/.config/teleclaude/minecraft-greeted.json"
 
 [daemon]
 # Where Claude turns start. Env: CLAUDE_WORKDIR.

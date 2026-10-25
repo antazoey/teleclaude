@@ -4,7 +4,7 @@ A small open protocol for driving [Claude Code](https://docs.claude.com/en/docs/
 remote machine over a chat channel. A daemon runs on the server and turns incoming messages into
 Claude Code turns. You talk to it from your phone, or another Claude talks to it from your laptop.
 
-Telegram is the default (and so far only) channel.
+Telegram is the default channel. Minecraft chat is the other one.
 
 ```mermaid
 flowchart LR
@@ -45,6 +45,25 @@ Implementations register with `@register(RECEIVERS)` or `@register(SENDERS)` und
 - `TelegramChannelSender` logs in as **your own account** over MTProto (via Telethon) and messages
   that bot. Bots cannot message other bots, and sending as you means the daemon's pairing
   already trusts the client.
+
+### Minecraft
+
+`MinecraftChannelReceiver` puts Claude in a Minecraft server's chat. It tails the server's
+`latest.log` for chat lines that start with the prefix (`@claude build me a farm`) and answers the
+paired player privately with `tellraw` over RCON. There is no client end; you talk to it in game.
+Replies are ASCII only, since the game font has no emoji; set `ascii_only` to change that.
+A reply for a player who has left is held and sent when they rejoin, and every other player gets a
+`greeting` on their first join.
+
+Run it as a second daemon beside the Telegram one, with its own config:
+
+1. Expose RCON to the host only, e.g. `127.0.0.1:25575:25575` in the server's compose ports.
+2. Write `~/.config/teleclaude/minecraft.toml` with `channel = "minecraft"`, a `[minecraft]`
+   section and a `[daemon]` section (see `config.example.toml`), and `chmod 600` it.
+3. Install `teleclaude-minecraft.service` the same way as `teleclaude.service`.
+4. Say `@claude hi` in game. The first player to use the prefix is paired.
+
+`/upgrade` restarts only the daemon it was sent to.
 
 ## Protocol
 

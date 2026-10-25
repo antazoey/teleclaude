@@ -13,6 +13,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -29,13 +30,28 @@ import protocol
 from channels import Inbound, RECEIVERS, find_channel
 from config import Config
 
-VERSION = "0.0.9"
+VERSION = "0.0.10"
 WORKING_PREFIX = "⚙️ "
 DEPLOY_LOG = Path.home() / ".config/teleclaude/deploy.log"
 DEPLOY_COMMIT_PATTERN = re.compile(r"^teleclaude v\d+\.\d+\.\d+$")
 DEPLOY_VERSION_SUFFIX = re.compile(r" \(v\d+\.\d+\.\d+\)$")
 CHANGE_NOTES_NAME = "CHANGES.pending"
 CHANGE_NOTE_BULLET = "- "
+GREETING_RESPONSES = (
+    "Hi there!",
+    "Hey hey!",
+    "Hello! What's up?",
+    "Yo! I'm here.",
+    "Heyyy :)",
+    "Hi! Ready when you are.",
+    "Howdy!",
+    "Hey! Still alive and listening.",
+)
+GREETING_WORDS = (
+    "hi", "hello", "hey", "heya", "hiya", "yo", "sup", "wassup", "whats up", "whatsup", "howdy", "hola",
+    "hey there", "hi there", "hello there", "good morning", "good afternoon", "good evening", "you there",
+    "are you there", "ping",
+)
 SASSY_RESPONSES = (
     "ok! Let me get started…",
     "thinking…",
@@ -124,6 +140,40 @@ TOOL_LABELS = {
     "WebFetch": "Fetching a page",
     "WebSearch": "Searching the web",
 }
+# Guesses at a bare shell command's intent when the tool call carried no description.
+BASH_PROGRAM_LABELS = {
+    "awk": "Processing text in a file",
+    "cat": "Reading a file",
+    "chmod": "Changing file permissions",
+    "chown": "Changing file ownership",
+    "cp": "Copying files",
+    "curl": "Fetching a URL",
+    "df": "Checking disk space",
+    "du": "Checking disk usage",
+    "find": "Looking for files matching a pattern",
+    "head": "Reading the start of a file",
+    "kill": "Stopping a process",
+    "less": "Reading a file",
+    "ls": "Checking a folder's contents",
+    "mkdir": "Creating a folder",
+    "mktemp": "Creating a temporary file",
+    "mv": "Moving files",
+    "pkill": "Stopping a process",
+    "ps": "Checking running processes",
+    "rm": "Deleting files",
+    "rsync": "Syncing files",
+    "scp": "Copying files to a remote host",
+    "sed": "Editing text in a file",
+    "ssh": "Connecting to a remote host",
+    "systemctl": "Checking or controlling a service",
+    "tail": "Reading the end of a file",
+    "tar": "Archiving files",
+    "touch": "Creating a file",
+    "unzip": "Extracting an archive",
+    "wget": "Fetching a URL",
+    "zip": "Compressing files",
+}
+BASH_SEARCH_PROGRAMS = ("grep", "rg", "ag")
 DEBUG_ON_WORDS = ("on", "1", "true", "yes")
 DEBUG_OFF_WORDS = ("off", "0", "false", "no")
 PROMPT_ECHO_CHARS = 100
@@ -295,6 +345,12 @@ def is_stop_request(text):
     return re.sub(r"[^a-z ]", "", text.lower()).strip() in STOP_WORDS
 
 
+def is_greeting(text):
+    """A bare hello, matched whole so a prompt that opens with one still runs."""
+    words = [re.sub(r"(.)\1+$", r"\1", word) for word in re.sub(r"[^a-z ]", "", text.lower()).split() if word != "claude"]
+    return " ".join(words) in GREETING_WORDS
+
+
 def mentions_long_wait(text):
     """Whether the text describes work that waits on something slow, like CI or a build."""
     lowered = text.lower()
@@ -352,6 +408,40 @@ def describe_tool(block):
     return f"[{name}] {detail}" if detail else f"[{name}]"
 
 
+def bash_program(command):
+    """The command's real program name, past any leading `sudo`/env assignments."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+
+    while tokens and (tokens[0] == "sudo" or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0])):
+        tokens.pop(0)
+
+    return tokens
+
+
+def guess_bash_intent(command):
+    """A best-effort human-readable guess at a bare shell command's intent, for when no description was given."""
+    tokens = bash_program(command)
+    if not tokens:
+        return None
+
+    program = Path(tokens[0]).name
+    args = tokens[1:]
+    if program in BASH_SEARCH_PROGRAMS:
+        pattern = next((arg for arg in args if not arg.startswith("-")), None)
+        if pattern:
+            return f"Searching files for strings like '{condense(pattern, 60)}'"
+
+    if program == "ls":
+        path = next((arg for arg in args if not arg.startswith("-")), None)
+        if path:
+            return f"Checking {Path(path).name or path} folder"
+
+    return BASH_PROGRAM_LABELS.get(program)
+
+
 def narrate_tool(block):
     """What the tool is doing, phrased for a reader rather than a shell."""
     name = block.get("name", "tool")
@@ -360,6 +450,11 @@ def narrate_tool(block):
     if payload.get("description"):
         head, separator, rest = condense(payload["description"], NARRATION_CHARS).partition(" ")
         return f"{to_gerund(head)}{separator}{rest}…"
+
+    if name == "Bash":
+        guess = guess_bash_intent(payload.get("command", ""))
+        if guess:
+            return f"{guess}…"
 
     for key in TOOL_PATH_KEYS:
         if payload.get(key):
@@ -642,7 +737,7 @@ class Daemon:
 
     def route_inbound(self, inbound):
         text = (inbound.text or "").strip()
-        if protocol.decode(text) or text.startswith("/") or is_stop_request(text):
+        if protocol.decode(text) or text.startswith("/") or is_stop_request(text) or is_greeting(text):
             self.spawn(self.handle(inbound))  # TUI envelopes reassemble themselves
         else:
             self.buffer_inbound(inbound)
@@ -692,6 +787,8 @@ class Daemon:
                 await self.handle_command(request, text)
             elif is_stop_request(text):
                 await self.reply(request, self.stop_everything())
+            elif is_greeting(text):
+                await self.reply(request, random.choice(GREETING_RESPONSES))
             elif inbound.voices:
                 await self.handle_voice_turn(request, text, inbound)
             else:
@@ -1375,6 +1472,7 @@ async def main(preflight=False):
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as http:
         channel = receiver_class.from_config(config, http, partial(remember_user, receiver_class.name), restarted["cursor"])
+        channel.ascii_only = config.get_bool("ascii_only", "TELECLAUDE_ASCII_ONLY", default=channel.ascii_only)
         identity = await channel.connect()
         session = Session(workdir, model=model)
         session.session_id = restarted["session"] or None

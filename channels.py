@@ -2,16 +2,49 @@
 
 import asyncio
 import base64
+import json
+import re
+import struct
+import unicodedata
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import NamedTuple
 
 from config import resolve_config_path
 
+ASCII_REPLACEMENTS = str.maketrans({
+    "\u00a0": " ",
+    "\u00d7": "x",
+    "\u2013": "-",
+    "\u2014": "-",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2022": "-",
+    "\u2026": "...",
+    "\u2192": "->",
+})
 DEFAULT_CHANNEL = "telegram"
 MAX_MESSAGE_CHARS = 3800
+MINECRAFT_CHAT_PATTERN = re.compile(r"^\[[\d:]+\] \[[^\]]+\]: (?:\[Not Secure\] )?<(\w{1,16})> (.*)$")
+MINECRAFT_DEFAULT_GREETING = "Hi {player}! I am Claude, let me know if I can help :)"
+MINECRAFT_DEFAULT_PREFIX = "@claude"
+MINECRAFT_JOIN_PATTERN = re.compile(r"^\[[\d:]+\] \[[^\]]+\]: (?:System chat: )?(\w{1,16}) joined the game$")
+MINECRAFT_MAX_MESSAGE_CHARS = 400
+MINECRAFT_OFFLINE_RESPONSE = "No player was found"
+MINECRAFT_POLL_SECONDS = 0.5
+MINECRAFT_REPLY_PROMPT = """Your replies are read in Minecraft chat, by a player in the game.
+- Write plain ASCII text only. Markdown, code fences, tables, links and emoji do not render.
+- Keep replies to a few short lines, since chat is narrow and scrolls away fast.
+- The player sees a one-line note per tool call and your final reply each turn, never tool output.
+- Write every reply to the player, never to the harness or a tool."""
 RECEIVERS = {}
 SENDERS = {}
+RCON_COMMAND = 2
+RCON_DEFAULT_HOST = "127.0.0.1"
+RCON_DEFAULT_PORT = 25575
+RCON_LOGIN = 3
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 TELEGRAM_FILE_API = "https://api.telegram.org/file/bot{token}/{path}"
 TELEGRAM_POLL_SECONDS = 50
@@ -23,6 +56,7 @@ TELEGRAM_REPLY_PROMPT = """Your replies are read in Telegram. Fenced code render
 - When reviewing, quote the exact lines you discuss with their real line numbers, and put each comment right after its fence.
 - **bold**, `inline code` and # headings render. Tables and [text](url) links do not, so use plain lists and bare URLs.
 The user is usually on their phone and often away for hours. They see a one-line note per tool call and your final reply each turn, never tool output, subagent results or this transcript.
+- That one-line note comes from each tool call's own description, so give Bash calls a specific, human-readable `description` every time ("Searching files for strings like 'X'", "Changing file permissions"), never the raw command and never a generic placeholder.
 - End every turn with a reply that stands alone: what you did, what you found, and what is still running.
 - Turns you start yourself, from a wakeup or a finished background task, reach the user too. Report findings there as soon as you have them.
 - Write every reply to the user, never to the harness or a tool."""
@@ -59,6 +93,11 @@ def split_message(text, limit=MAX_MESSAGE_CHARS):
         remaining = remaining[cut:].lstrip("\n")
 
 
+def to_ascii(text):
+    replaced = text.translate(ASCII_REPLACEMENTS)
+    return unicodedata.normalize("NFKD", replaced).encode("ascii", "ignore").decode()
+
+
 class Inbound(NamedTuple):
     chat_id: int | str
     text: str
@@ -77,6 +116,8 @@ class TeleclaudeChannelReceiver(ABC):
     cursor = None
     # Appended to Claude's system prompt so replies suit how this channel renders them.
     reply_prompt = None
+    # Outgoing text reduced to ASCII, for clients that cannot show the rest.
+    ascii_only = False
 
     @classmethod
     @abstractmethod
@@ -94,6 +135,9 @@ class TeleclaudeChannelReceiver(ABC):
     @abstractmethod
     async def send(self, chat_id, text, reply_to=None, verbatim=False):
         """Sends markdown for a person to read, or `verbatim` text exactly as given."""
+
+    def render(self, text):
+        return to_ascii(text) if self.ascii_only else text
 
     async def send_typing(self, chat_id):
         pass
@@ -267,6 +311,7 @@ class TelegramChannelReceiver(TeleclaudeChannelReceiver):
         return response.content
 
     async def send(self, chat_id, text, reply_to=None, verbatim=False):
+        text = self.render(text)
         reply = {"reply_parameters": {"message_id": reply_to, "allow_sending_without_reply": True}} if reply_to else {}
         if verbatim:
             messages = [(chunk, []) for chunk in split_message(text, self.max_message_chars)]
@@ -370,3 +415,218 @@ class TelegramChannelSender(TeleclaudeChannelSender):
     async def close(self):
         if self.client:
             await self.client.disconnect()
+
+
+def build_tellraw(player, text):
+    components = ["", {"text": "[Claude] ", "color": "gold"}, {"text": text}]
+    return f"tellraw {player} {json.dumps(components, ensure_ascii=False)}"
+
+
+class Rcon:
+    """A Minecraft RCON connection that logs in on first use and again after a drop."""
+
+    def __init__(self, host, port, password):
+        self.host = host
+        self.port = port
+        self.password = password
+        self.reader = None
+        self.writer = None
+        self.request_id = 0
+        self.lock = asyncio.Lock()
+
+    async def run_command(self, command):
+        async with self.lock:
+            try:
+                return await self.exchange(command)
+            except (OSError, asyncio.IncompleteReadError):
+                self.disconnect()
+                return await self.exchange(command)
+
+    async def exchange(self, command):
+        if self.writer is None:
+            self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+            await self.request(RCON_LOGIN, self.password)
+
+        return await self.request(RCON_COMMAND, command)
+
+    async def request(self, kind, body):
+        self.request_id += 1
+        payload = struct.pack("<ii", self.request_id, kind) + body.encode() + b"\0\0"
+        self.writer.write(struct.pack("<i", len(payload)) + payload)
+        await self.writer.drain()
+
+        (length,) = struct.unpack("<i", await self.reader.readexactly(4))
+        packet = await self.reader.readexactly(length)
+        (response_id,) = struct.unpack("<i", packet[:4])
+        if response_id == -1:
+            self.disconnect()
+            raise RuntimeError("rcon refused the password")
+
+        return packet[8:-2].decode(errors="replace")
+
+    def disconnect(self):
+        if self.writer:
+            self.writer.close()
+
+        self.reader = self.writer = None
+
+
+@register(RECEIVERS)
+class MinecraftChannelReceiver(TeleclaudeChannelReceiver):
+    """A Minecraft server's chat, read from its log and answered over RCON, for the one paired player."""
+
+    name = "minecraft"
+    max_message_chars = MINECRAFT_MAX_MESSAGE_CHARS
+    reply_prompt = MINECRAFT_REPLY_PROMPT
+    ascii_only = True
+
+    def __init__(
+        self,
+        log_path,
+        rcon,
+        prefix=MINECRAFT_DEFAULT_PREFIX,
+        player=None,
+        remember_user=None,
+        cursor=None,
+        greeting=MINECRAFT_DEFAULT_GREETING,
+        greeted_path=None,
+    ):
+        self.log_path = Path(log_path)
+        self.rcon = rcon
+        self.prefix = prefix
+        self.player = player
+        self.remember_user = remember_user
+        self.cursor = cursor
+        self.log_inode = None
+        self.greeting = greeting
+        self.greeted_path = Path(greeted_path) if greeted_path else None
+        self.held_reply = None
+
+    @classmethod
+    def from_config(cls, config, http, remember_user, cursor):
+        log_path = config.get_path("minecraft.log", "MINECRAFT_LOG")
+        password = config.get("minecraft.rcon_password", "MINECRAFT_RCON_PASSWORD")
+        if not log_path or not password:
+            raise SystemExit(f"Set minecraft.log and minecraft.rcon_password in {resolve_config_path()}")
+
+        rcon = Rcon(
+            config.get("minecraft.rcon_host", "MINECRAFT_RCON_HOST", default=RCON_DEFAULT_HOST),
+            int(config.get("minecraft.rcon_port", "MINECRAFT_RCON_PORT", default=RCON_DEFAULT_PORT)),
+            str(password),
+        )
+        return cls(
+            log_path,
+            rcon,
+            config.get("minecraft.prefix", "MINECRAFT_PREFIX", default=MINECRAFT_DEFAULT_PREFIX),
+            config.get("minecraft.player", "MINECRAFT_USER_ID"),
+            remember_user,
+            int(cursor) if cursor else None,
+            config.get("minecraft.greeting", "MINECRAFT_GREETING", default=MINECRAFT_DEFAULT_GREETING),
+            config.get_path(
+                "minecraft.greeted",
+                "MINECRAFT_GREETED",
+                default=resolve_config_path().with_name("minecraft-greeted.json"),
+            ),
+        )
+
+    async def connect(self):
+        await self.rcon.run_command("list")
+        if self.cursor is None:
+            self.cursor = self.log_path.stat().st_size if self.log_path.exists() else 0
+
+        return f"{self.prefix} on {self.rcon.host}:{self.rcon.port}"
+
+    async def receive(self):
+        while True:
+            for line in self.read_new_lines():
+                inbound = await self.admit(line)
+                if inbound:
+                    yield inbound
+
+            await asyncio.sleep(MINECRAFT_POLL_SECONDS)
+
+    def read_new_lines(self):
+        """Complete log lines written since the cursor, starting over when the server rotates the log."""
+        try:
+            stat = self.log_path.stat()
+        except FileNotFoundError:
+            return []
+
+        rotated = self.log_inode is not None and stat.st_ino != self.log_inode
+        if rotated or stat.st_size < self.cursor:
+            self.cursor = 0
+
+        self.log_inode = stat.st_ino
+        with self.log_path.open("rb") as handle:
+            handle.seek(self.cursor)
+            data = handle.read()
+
+        complete = data[: data.rfind(b"\n") + 1]
+        self.cursor += len(complete)
+        return complete.decode(errors="replace").splitlines()
+
+    async def admit(self, line):
+        """The chat line as an Inbound when it is addressed to Claude by a player who may prompt it; the first one pairs."""
+        joined = MINECRAFT_JOIN_PATTERN.match(line)
+        if joined:
+            await self.welcome(joined.group(1))
+            return None
+
+        match = MINECRAFT_CHAT_PATTERN.match(line)
+        if not match:
+            return None
+
+        player, text = match.groups()
+        if not text.lower().startswith(self.prefix.lower()):
+            return None
+
+        prompt = text[len(self.prefix):].strip()
+        if not prompt:
+            return None
+
+        if self.player is None:
+            self.player = player
+            if self.remember_user:
+                self.remember_user(player)
+
+            await self.send(player, f"Paired with {player}. Everyone else is ignored now.")
+
+        elif player != self.player:
+            print(f"ignored message from {player}", flush=True)
+            return None
+
+        return Inbound(player, prompt, None)
+
+    async def send(self, chat_id, text, reply_to=None, verbatim=False):
+        for chunk in split_message(self.render(text), self.max_message_chars):
+            response = await self.rcon.run_command(build_tellraw(chat_id, chunk))
+            if chat_id == self.player and response.startswith(MINECRAFT_OFFLINE_RESPONSE):
+                await self.hold_reply(chat_id, text)
+                return
+
+    async def hold_reply(self, player, text):
+        """Keeps the paired player's latest reply until they rejoin, telling whoever is online once."""
+        if self.held_reply is None:
+            notice = f"Oh, {player} left, I will hold my reply until they return."
+            await self.rcon.run_command(build_tellraw("@a", self.render(notice)))
+
+        self.held_reply = text
+
+    async def welcome(self, player):
+        """Hands a rejoining paired player their held reply, and greets every other player on their first join."""
+        if player == self.player:
+            if self.held_reply:
+                held_reply, self.held_reply = self.held_reply, None
+                await self.send(player, f"Oh hi, hey I never sent you the response to your last query, here it is now: {held_reply}")
+
+            return
+
+        if not self.greeting or not self.greeted_path:
+            return
+
+        greeted = set(json.loads(self.greeted_path.read_text())) if self.greeted_path.exists() else set()
+        if player in greeted:
+            return
+
+        self.greeted_path.write_text(json.dumps(sorted(greeted | {player})))
+        await self.send(player, self.greeting.format(player=player))

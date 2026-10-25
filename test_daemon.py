@@ -509,7 +509,20 @@ def test_narrate_tool_rewrites_the_description_as_an_action():
 def test_narrate_tool_falls_back_when_no_description():
     assert daemon.narrate_tool({"name": "Read", "input": {"file_path": "/home/user/teleclaude/daemon.py"}}) == "Reading daemon.py…"
     assert daemon.narrate_tool({"name": "Grep", "input": {"pattern": "teleclaude"}}) == "Searching for teleclaude…"
-    assert daemon.narrate_tool({"name": "Bash", "input": {"command": "ls"}}) == "Running a command…"
+    assert daemon.narrate_tool({"name": "Bash", "input": {"command": "ls"}}) == "Checking a folder's contents…"
+    assert daemon.narrate_tool({"name": "Bash", "input": {"command": "launchctl list"}}) == "Running a command…"
+
+
+def test_guess_bash_intent_reads_common_programs():
+    assert daemon.guess_bash_intent("grep -rn teleclaude daemon.py") == "Searching files for strings like 'teleclaude'"
+    assert daemon.guess_bash_intent("rg --files-with-matches foo") == "Searching files for strings like 'foo'"
+    assert daemon.guess_bash_intent("ls -la /home/user/Documents") == "Checking Documents folder"
+    assert daemon.guess_bash_intent("chmod +x push-session.py") == "Changing file permissions"
+    assert daemon.guess_bash_intent("mktemp -d") == "Creating a temporary file"
+    assert daemon.guess_bash_intent("sudo systemctl restart teleclaude") == "Checking or controlling a service"
+    assert daemon.guess_bash_intent("FOO=bar mkdir -p /tmp/scratch") == "Creating a folder"
+    assert daemon.guess_bash_intent("launchctl list") is None
+    assert daemon.guess_bash_intent("") is None
 
 
 def test_test_command_installs_every_declared_dependency():
@@ -818,6 +831,32 @@ def test_resume_session_adopts_a_pushed_transcript(mocker, tmp_path):
 )
 def test_is_stop_request_matches_a_bare_stop_only(text, stopping):
     assert daemon.is_stop_request(text) is stopping
+
+
+@pytest.mark.parametrize(
+    "text, greeting",
+    [
+        ("Hi", True),
+        ("hello!", True),
+        ("What's up?", True),
+        ("heyyy Claude", True),
+        ("hi, can you check my PRs", False),
+        ("", False),
+    ],
+)
+def test_is_greeting_matches_a_bare_hello_only(text, greeting):
+    assert daemon.is_greeting(text) is greeting
+
+
+@pytest.mark.asyncio
+async def test_handle_answers_a_greeting_without_starting_claude(mocker):
+    channel = mocker.AsyncMock()
+    service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
+
+    await service.handle(Inbound(7, "Hello!", 1))
+
+    assert channel.send.call_args.args[1] in daemon.GREETING_RESPONSES
+    assert service.session.process is None
 
 
 @pytest.mark.asyncio
