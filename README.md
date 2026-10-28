@@ -138,13 +138,19 @@ Photos and voice memos work too: voice is transcribed on the server with a local
 
 ### Timeouts
 
-A turn times out only when it stops making progress. Progress means a tool call or remark unlike
-the recent ones, so a loop re-running the same commands counts as stuck while real work never does.
+A turn times out only when it stops making progress. Progress means a tool call, a tool result or
+a remark unlike the recent ones, so a loop re-running the same commands counts as stuck while real
+work never does. A tool that is still running is never a stall on its own.
 
-- 15 minutes without progress, normally.
+- 15 minutes without progress while no tool is running, normally.
 - An hour while the prompt or the current tool call waits on something slow: CI, a deploy, a
   build, a watch or sleep loop.
+- A running tool gets its own timeout plus 5 minutes: a Bash call's `timeout` (2 minutes by
+  default, at most 10), an hour for subagents, monitors and background commands.
 - Never, after `/timeout off`, until `/timeout on`.
+
+The heartbeat says what the turn is doing: the running tool and how long it has run, or the last
+thing claude said between steps.
 
 ## Code in replies
 

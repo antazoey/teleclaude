@@ -30,7 +30,7 @@ import protocol
 from channels import Inbound, RECEIVERS, find_channel
 from config import Config
 
-VERSION = "0.0.10"
+VERSION = "0.0.11"
 WORKING_PREFIX = "⚙️ "
 DEPLOY_LOG = Path.home() / ".config/teleclaude/deploy.log"
 DEPLOY_COMMIT_PATTERN = re.compile(r"^teleclaude v\d+\.\d+\.\d+$")
@@ -108,6 +108,13 @@ IDLE_DRAIN_SECONDS = 15
 PATIENT_HEARTBEAT_SECONDS = 600
 STALL_TIMEOUT_SECONDS = 15 * 60
 PATIENT_STALL_TIMEOUT_SECONDS = 60 * 60
+# A running tool is not a stall until it outlives its own timeout by this much.
+TOOL_GRACE_SECONDS = 5 * 60
+DEFAULT_TOOL_TIMEOUT_SECONDS = 2 * 60
+MAX_TOOL_TIMEOUT_SECONDS = 10 * 60
+# Tools that run as long as the work they wait on.
+LONG_RUNNING_TOOLS = ("Agent", "Task", "Monitor", "Workflow")
+ACTIVITY_CHARS = 80
 # Recent tool calls and remarks a new one must differ from to count as progress.
 PROGRESS_WINDOW = 8
 # Words that mark a prompt or tool call as waiting on something slow.
@@ -363,6 +370,28 @@ def is_patient_tool(block):
     return mentions_long_wait(" ".join(str(part) for part in parts))
 
 
+def tool_timeout(block):
+    """How long a tool call may legitimately run before its silence counts as a stall."""
+    payload = block.get("input") or {}
+    if block.get("name") in LONG_RUNNING_TOOLS or payload.get("run_in_background"):
+        return PATIENT_STALL_TIMEOUT_SECONDS
+
+    requested = payload.get("timeout")
+    if block.get("name") == "Bash" and isinstance(requested, (int, float)) and requested > 0:
+        return min(requested / 1000, MAX_TOOL_TIMEOUT_SECONDS)
+
+    return DEFAULT_TOOL_TIMEOUT_SECONDS
+
+
+def finished_tool_ids(event):
+    """The tool calls a user event reports results for."""
+    content = event.get("message", {}).get("content", [])
+    if not isinstance(content, list):
+        return []
+
+    return [block.get("tool_use_id") for block in content if isinstance(block, dict) and block.get("type") == "tool_result"]
+
+
 def progress_fingerprint(block):
     """A comparable identity for a tool call or remark."""
     if block.get("type") == "tool_use":
@@ -533,6 +562,19 @@ class Request(NamedTuple):
     protocol_id: str | None = None
 
 
+class RunningTool:
+    """A tool call claude started and has not reported a result for."""
+
+    def __init__(self, block, label, started_at):
+        self.name = block.get("name", "tool")
+        self.label = label
+        self.started_at = started_at
+        self.timeout = tool_timeout(block)
+
+    def overdue(self, now):
+        return now - self.started_at > self.timeout + TOOL_GRACE_SECONDS
+
+
 class Session:
     """One Claude conversation, pinned to a working directory."""
 
@@ -547,6 +589,8 @@ class Session:
         self.last_activity = None
         self.patient = False
         self.patient_tool = False
+        self.running_tools = {}
+        self.last_remark = None
         self.claimed = False
         self.pending = deque()
 
@@ -564,6 +608,7 @@ class Session:
             return False
 
         self.process.terminate()
+        self.running_tools.clear()
         return True
 
 
@@ -717,6 +762,7 @@ class Daemon:
         self.patient_forced = None
         self.timeout_enabled = True
         self.last_progress_at = None
+        self.last_event_at = None
         self.recent_progress = deque(maxlen=PROGRESS_WINDOW)
         self.stream_idle = True
         self.idle_since = None
@@ -984,7 +1030,8 @@ class Daemon:
 
         return (
             f"Timeout on: a turn gives up after {format_duration(STALL_TIMEOUT_SECONDS)} without progress,"
-            f" {format_duration(PATIENT_STALL_TIMEOUT_SECONDS)} while it waits on something slow."
+            f" {format_duration(PATIENT_STALL_TIMEOUT_SECONDS)} while it waits on something slow;"
+            f" a running tool gets its own timeout plus {format_duration(TOOL_GRACE_SECONDS)}."
         )
 
     def set_patient(self, argument):
@@ -1207,9 +1254,19 @@ class Daemon:
         if not self.timeout_enabled or not self.last_progress_at:
             return False
 
-        stalled_for = time.monotonic() - self.last_progress_at
-        if stalled_for < self.stall_timeout:
-            return False
+        now = time.monotonic()
+        running = list(self.session.running_tools.values())
+        if running:
+            oldest = min(running, key=lambda tool: tool.started_at)
+            quiet_for = now - (self.last_event_at or oldest.started_at)
+            if not oldest.overdue(now) or quiet_for < TOOL_GRACE_SECONDS:
+                return False
+
+            stalled_for = now - oldest.started_at
+        else:
+            stalled_for = now - self.last_progress_at
+            if stalled_for < self.stall_timeout:
+                return False
 
         requests = list(self.session.pending)
         self.session.stop()
@@ -1235,10 +1292,26 @@ class Daemon:
 
         self.recent_progress.append(fingerprint)
 
+    def track_tool_start(self, block):
+        """Remembers a tool call until its result arrives, so its silence is not a stall."""
+        tool_id = block.get("id")
+        if tool_id:
+            self.session.running_tools[tool_id] = RunningTool(block, self.render_tool(block), time.monotonic())
+
+    def track_tool_results(self, event):
+        """A finished tool call is progress, and no longer in flight."""
+        finished = [tool_id for tool_id in finished_tool_ids(event) if tool_id in self.session.running_tools]
+        for tool_id in finished:
+            del self.session.running_tools[tool_id]
+
+        if finished:
+            self.last_progress_at = time.monotonic()
+
     def stall_note(self):
         """What can be said about a quiet turn from this side of the pipe alone."""
-        elapsed = format_duration(time.monotonic() - (self.turn_started_at or time.monotonic()))
-        parts = [f"Teleclaude still thinking… ({elapsed})"]
+        now = time.monotonic()
+        elapsed = format_duration(now - (self.turn_started_at or now))
+        parts = [f"Teleclaude working ({elapsed}): {self.describe_activity(now)}"]
         if not self.session.running:
             parts.append("the claude process is gone; /new to start over")
 
@@ -1247,6 +1320,23 @@ class Daemon:
             parts.append(hint)
 
         return "\n".join(parts)
+
+    def describe_activity(self, now):
+        """The running tool and how long it has run, or the last thing claude said between steps."""
+        running = sorted(self.session.running_tools.values(), key=lambda tool: tool.started_at)
+        if running:
+            oldest = running[0]
+            label = condense(oldest.label.rstrip("…"), ACTIVITY_CHARS)
+            activity = f"{label} for {format_duration(now - oldest.started_at)}"
+            if len(running) > 1:
+                activity += f" (+{len(running) - 1} more)"
+
+            return activity
+
+        if self.session.last_remark:
+            return f"between steps; last: {condense(self.session.last_remark, ACTIVITY_CHARS)}"
+
+        return "thinking"
 
     async def ensure_stream(self):
         if self.session.running:
@@ -1288,15 +1378,23 @@ class Daemon:
         # A result is the last event of a turn, so the process is idle until the next prompt.
         self.stream_idle = event.get("type") == "result"
         self.idle_since = time.monotonic() if self.stream_idle else None
+        self.last_event_at = time.monotonic()
 
         if event.get("type") == "assistant":
             self.adopt_self_started_turn()
             for block in event.get("message", {}).get("content", []):
                 self.track_progress(block)
                 if block.get("type") == "tool_use":
+                    self.track_tool_start(block)
                     await self.announce(self.render_tool(block))
+                elif block.get("type") == "text" and block.get("text", "").strip():
+                    self.session.last_remark = block["text"].strip()
+
+        elif event.get("type") == "user":
+            self.track_tool_results(event)
 
         elif event.get("type") == "result":
+            self.session.running_tools.clear()
             request = self.next_request()
             if request is not None:
                 await self.notify(request, event.get("result") or "(no answer)")

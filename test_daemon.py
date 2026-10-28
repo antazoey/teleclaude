@@ -708,8 +708,7 @@ async def test_heartbeat_forever_pings_only_once_the_chat_has_gone_quiet(mocker)
     heartbeat.cancel()
 
     ping = sent_texts(channel)[0]
-    assert "still thinking" in ping
-    assert "1m30s" in ping
+    assert "Teleclaude working (1m30s)" in ping
     assert "529" in ping, "the upstream failure was in stderr but never reached the user"
 
 
@@ -958,3 +957,101 @@ async def test_dispatch_reports_a_self_started_turn_to_the_last_chat(mocker):
     assert sent_texts(channel) == [f"{daemon.WORKING_PREFIX}checking the review…", "review findings"]
     assert channel.send.call_args.kwargs["reply_to"] is None
     assert not service.session.pending
+
+
+def tool_use_event(tool_id, name, payload):
+    block = {"type": "tool_use", "id": tool_id, "name": name, "input": payload}
+    return {"type": "assistant", "message": {"content": [block]}}
+
+
+def tool_result_event(tool_id):
+    block = {"type": "tool_result", "tool_use_id": tool_id, "content": "ok"}
+    return {"type": "user", "message": {"content": [block]}}
+
+
+@pytest.fixture
+def running_service(mocker):
+    channel = mocker.AsyncMock()
+    service = daemon.Daemon(channel, daemon.Session("/tmp"), "claude", True)
+    service.session.process = mocker.Mock(returncode=None)
+    service.session.pending.append(daemon.Request(1, None))
+    service.stream_idle = False
+    return service
+
+
+@pytest.mark.asyncio
+async def test_enforce_timeout_waits_out_a_running_tool_until_its_own_timeout(running_service):
+    service = running_service
+    await service.dispatch(tool_use_event("t1", "Bash", {"command": "cargo test -p big", "timeout": 600_000}))
+    tool = service.session.running_tools["t1"]
+    now = time.monotonic()
+    allowed = tool.timeout + daemon.TOOL_GRACE_SECONDS
+
+    # Quiet past the no-progress timeout, but the tool is still inside its own timeout.
+    service.last_progress_at = now - daemon.STALL_TIMEOUT_SECONDS - 60
+    service.last_event_at = now - daemon.STALL_TIMEOUT_SECONDS - 60
+    tool.started_at = now - allowed + 30
+    assert await service.enforce_timeout() is False
+
+    # Past its own timeout plus the grace, with no events since, it is stuck.
+    tool.started_at = now - allowed - 30
+    assert await service.enforce_timeout() is True
+    assert "Gave up after" in sent_texts(service.channel)[-1]
+
+
+@pytest.mark.asyncio
+async def test_enforce_timeout_gives_a_subagent_the_patient_window(running_service):
+    service = running_service
+    await service.dispatch(tool_use_event("t1", "Task", {"description": "review the diff", "subagent_type": "Explore"}))
+    long_ago = time.monotonic() - 50 * 60
+    service.session.running_tools["t1"].started_at = long_ago
+    service.last_progress_at = long_ago
+    service.last_event_at = long_ago
+
+    assert await service.enforce_timeout() is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_result_clears_the_running_tool_and_counts_as_progress(running_service):
+    service = running_service
+    await service.dispatch(tool_use_event("t1", "Bash", {"command": "sleep 1"}))
+    assert "t1" in service.session.running_tools
+
+    stale = time.monotonic() - 600
+    service.last_progress_at = stale
+    await service.dispatch(tool_result_event("t1"))
+
+    assert service.session.running_tools == {}
+    assert service.last_progress_at > stale
+
+
+@pytest.mark.asyncio
+async def test_enforce_timeout_still_gives_up_with_nothing_running(running_service):
+    service = running_service
+    service.last_progress_at = time.monotonic() - daemon.STALL_TIMEOUT_SECONDS - 1
+
+    assert service.session.running_tools == {}
+    assert await service.enforce_timeout() is True
+
+
+@pytest.mark.asyncio
+async def test_stall_note_names_the_running_tool_and_how_long_it_has_run(running_service):
+    service = running_service
+    service.debug = True
+    service.turn_started_at = time.monotonic() - 606
+    await service.dispatch(tool_use_event("t1", "Bash", {"command": "cargo test -p big"}))
+    service.session.running_tools["t1"].started_at = time.monotonic() - 372
+
+    note = service.stall_note()
+
+    assert note.startswith("Teleclaude working (10m06s): [Bash] cargo test -p big for 6m12s")
+
+
+@pytest.mark.asyncio
+async def test_stall_note_quotes_the_last_remark_between_steps(running_service):
+    service = running_service
+    service.turn_started_at = time.monotonic() - 30
+    await service.dispatch({"type": "assistant", "message": {"content": [{"type": "text", "text": "Waiting for CI to start."}]}})
+
+    assert "between steps; last: Waiting for CI to start." in service.stall_note()
+
